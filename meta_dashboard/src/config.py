@@ -80,6 +80,7 @@ class Config:
 
         # Load client configurations
         client_mappings = {
+            'moussse': ('MOUSSSE_AD_ACCOUNT', 'Moussse'),
             'storelli': ('STORELLI_AD_ACCOUNT', 'Storelli'),
             'feelnuyu': ('FEELNUYU_AD_ACCOUNT', 'FeelNuyu'),
             'luna_daily': ('LUNA_DAILY_AD_ACCOUNT', 'Luna Daily'),

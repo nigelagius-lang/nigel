@@ -21,6 +21,11 @@ from src.config import config
 # Default client configurations
 DEFAULT_CLIENTS = [
     {
+        'name': 'moussse',
+        'display_name': 'Moussse',
+        'description': '',
+    },
+    {
         'name': 'storelli',
         'display_name': 'Storelli',
         'description': 'Goalkeeper protection gear',
@@ -95,6 +100,7 @@ def setup():
 
     # Get ad account mappings from config
     ad_account_map = {
+        'moussse': os.getenv('MOUSSSE_AD_ACCOUNT', ''),
         'storelli': os.getenv('STORELLI_AD_ACCOUNT', ''),
         'feelnuyu': os.getenv('FEELNUYU_AD_ACCOUNT', ''),
         'luna_daily': os.getenv('LUNA_DAILY_AD_ACCOUNT', ''),

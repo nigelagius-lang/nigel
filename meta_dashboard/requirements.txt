@@ -1,0 +1,27 @@
+# Meta Marketing Dashboard Dependencies
+# Core
+streamlit>=1.28.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Meta/Facebook API
+facebook-business>=17.0.0
+
+# Database
+sqlalchemy>=2.0.0
+
+# Visualization
+plotly>=5.18.0
+
+# Data Export
+openpyxl>=3.1.0  # Excel export
+reportlab>=4.0.0  # PDF generation
+
+# Utilities
+python-dotenv>=1.0.0
+requests>=2.31.0
+python-dateutil>=2.8.0
+
+# Optional: Notifications (uncomment when ready)
+# slack-sdk>=3.23.0
+# sendgrid>=6.10.0

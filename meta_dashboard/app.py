@@ -744,13 +744,17 @@ def render_tagging():
             st.markdown(reference)
 
     with tab2:
-        st.subheader("Upload Tagged CSV")
+        st.subheader("Upload Tagged File")
 
-        uploaded_file = st.file_uploader("Choose CSV file", type="csv")
+        uploaded_file = st.file_uploader("Choose CSV or Excel file", type=["csv", "xlsx", "xls"])
 
         if uploaded_file:
             try:
-                df = pd.read_csv(uploaded_file)
+                # Handle both CSV and Excel files
+                if uploaded_file.name.endswith('.csv'):
+                    df = pd.read_csv(uploaded_file)
+                else:
+                    df = pd.read_excel(uploaded_file)
                 st.write(f"Preview ({len(df)} rows):")
                 st.dataframe(df.head(10), use_container_width=True)
 

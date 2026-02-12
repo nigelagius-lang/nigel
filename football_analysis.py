@@ -116,6 +116,178 @@ def fetch_league_matches(season_id: int) -> list[dict]:
     return data
 
 
+_league_players_cache: dict[int, list[dict]] = {}
+
+def fetch_league_players(season_id: int) -> list[dict]:
+    """Fetch all players for a league season. Results are cached per season_id."""
+    if season_id in _league_players_cache:
+        return _league_players_cache[season_id]
+    data = api_get("league-players", {"season_id": season_id})
+    if not isinstance(data, list):
+        data = []
+    _league_players_cache[season_id] = data
+    return data
+
+
+def safe_float(val, default=0.0) -> float:
+    """Convert a value to float safely."""
+    try:
+        v = float(val)
+        return v if v >= 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def get_team_players(season_id: int, team_id: int) -> list[dict]:
+    """
+    Return player stats for a given team from the league-players endpoint.
+    Extracts fouls, shots, and shots on target into a normalised dict.
+    """
+    all_players = fetch_league_players(season_id)
+    team_players = []
+    for p in all_players:
+        pid_team = p.get("club_team_id") or p.get("team_id") or p.get("teamId")
+        if pid_team is None:
+            continue
+        if int(pid_team) != team_id:
+            continue
+
+        appearances = safe_int(p.get("appearances_overall", p.get("appearances", 0)), 0)
+        if appearances < 1:
+            continue
+
+        name = p.get("known_as") or p.get("full_name") or p.get("player_name") or "Unknown"
+        position = p.get("position", "")
+
+        # Shots – try per-game averages first, then totals
+        shots_total = safe_float(p.get("shots_overall", p.get("total_shots", 0)))
+        shots_per_game = safe_float(p.get("shots_per_game", p.get("shots_per_90_overall", 0)))
+        if shots_per_game == 0 and shots_total > 0 and appearances > 0:
+            shots_per_game = shots_total / appearances
+
+        sot_total = safe_float(p.get("shots_on_target_overall", p.get("total_shots_on_target", 0)))
+        sot_per_game = safe_float(p.get("shots_on_target_per_game",
+                        p.get("shots_on_target_per_90_overall", 0)))
+        if sot_per_game == 0 and sot_total > 0 and appearances > 0:
+            sot_per_game = sot_total / appearances
+
+        # Fouls committed
+        fouls_total = safe_float(p.get("fouls_committed_overall",
+                       p.get("fouls_committed", p.get("total_fouls_committed", 0))))
+        fouls_per_game = safe_float(p.get("fouls_committed_per_game",
+                          p.get("fouls_committed_per_90_overall", 0)))
+        if fouls_per_game == 0 and fouls_total > 0 and appearances > 0:
+            fouls_per_game = fouls_total / appearances
+
+        team_players.append({
+            "name": name,
+            "position": position,
+            "appearances": appearances,
+            "shots_total": shots_total,
+            "shots_per_game": shots_per_game,
+            "sot_total": sot_total,
+            "sot_per_game": sot_per_game,
+            "fouls_total": fouls_total,
+            "fouls_per_game": fouls_per_game,
+        })
+
+    # Sort by appearances descending (most likely starters first)
+    team_players.sort(key=lambda x: x["appearances"], reverse=True)
+    return team_players
+
+
+def compute_player_picks(players: list[dict], team_name: str) -> list[dict]:
+    """
+    Compute over/under picks for player fouls, shots, and SOT.
+    Uses per-game averages to estimate probability of hitting thresholds.
+    """
+    picks = []
+    for p in players:
+        if p["appearances"] < 3:
+            continue
+
+        name = p["name"]
+        apps = p["appearances"]
+
+        # --- Player Shots ---
+        if p["shots_total"] > 0:
+            for threshold in [0.5, 1.5, 2.5, 3.5]:
+                games_over = 0
+                # We use average to estimate: if avg >= threshold + 0.5, very likely
+                # But better: use total / appearances to get games_over estimate
+                # Since we don't have per-match data, use Poisson-like estimate
+                avg = p["shots_per_game"]
+                if avg > 0:
+                    # Estimate hit rate from average using simple model
+                    # P(X > threshold) ~ portion of games where shots > threshold
+                    # With just averages, approximate: if avg > threshold, >50% likely
+                    # Use a simple heuristic: hit_rate = min(avg / (threshold + 0.5), 1.0)
+                    # Better: use total and appearances
+                    games_over = _estimate_games_over(p["shots_total"], apps, threshold)
+                    pct = (games_over / apps * 100) if apps > 0 else 0
+                    if pct >= 50:
+                        picks.append({
+                            "category": "Player Shots",
+                            "market": f"{name} Over {threshold:.1f} Shots",
+                            "hits": games_over,
+                            "total": apps,
+                            "reason": f"{team_name} | Avg {avg:.1f} shots/game ({apps} apps)",
+                        })
+
+        # --- Player Shots on Target ---
+        if p["sot_total"] > 0:
+            for threshold in [0.5, 1.5, 2.5]:
+                avg = p["sot_per_game"]
+                if avg > 0:
+                    games_over = _estimate_games_over(p["sot_total"], apps, threshold)
+                    pct = (games_over / apps * 100) if apps > 0 else 0
+                    if pct >= 50:
+                        picks.append({
+                            "category": "Player SOT",
+                            "market": f"{name} Over {threshold:.1f} Shots on Target",
+                            "hits": games_over,
+                            "total": apps,
+                            "reason": f"{team_name} | Avg {avg:.1f} SOT/game ({apps} apps)",
+                        })
+
+        # --- Player Fouls Committed ---
+        if p["fouls_total"] > 0:
+            for threshold in [0.5, 1.5, 2.5]:
+                avg = p["fouls_per_game"]
+                if avg > 0:
+                    games_over = _estimate_games_over(p["fouls_total"], apps, threshold)
+                    pct = (games_over / apps * 100) if apps > 0 else 0
+                    if pct >= 50:
+                        picks.append({
+                            "category": "Player Fouls",
+                            "market": f"{name} Over {threshold:.1f} Fouls",
+                            "hits": games_over,
+                            "total": apps,
+                            "reason": f"{team_name} | Avg {avg:.1f} fouls/game ({apps} apps)",
+                        })
+
+    return picks
+
+
+def _estimate_games_over(total: float, apps: int, threshold: float) -> int:
+    """
+    Estimate how many games a player exceeded a threshold, given only
+    their season total and appearances.  Uses a Poisson CDF approximation.
+    """
+    import math
+    if apps <= 0 or total <= 0:
+        return 0
+    lam = total / apps  # average per game (lambda)
+    # P(X > threshold) = 1 - P(X <= floor(threshold))
+    k = int(threshold)  # e.g. threshold 0.5 -> k=0, threshold 1.5 -> k=1
+    # Poisson CDF: P(X <= k) = sum_{i=0}^{k} e^{-lam} * lam^i / i!
+    cdf = 0.0
+    for i in range(k + 1):
+        cdf += math.exp(-lam) * (lam ** i) / math.factorial(i)
+    prob_over = 1.0 - cdf
+    return round(prob_over * apps)
+
+
 # ---------------------------------------------------------------------------
 # Match field extraction helpers
 # ---------------------------------------------------------------------------
@@ -706,7 +878,11 @@ def format_report(
     missing_markets: list[str],
     home_avgs: dict,
     away_avgs: dict,
+    home_players: list[dict] | None = None,
+    away_players: list[dict] | None = None,
 ):
+    home_players = home_players or []
+    away_players = away_players or []
     home_name = match_info.get("home_name", "Home")
     away_name = match_info.get("away_name", "Away")
     league = match_info.get("league_name", match_info.get("competition_name", "Unknown League"))
@@ -769,6 +945,15 @@ def format_report(
         for p in rated_picks[:8]:
             print(f"  {p['category']:16s} | {p['market']:35s} | {p['hits']}/{p['total']} ({p['pct']:.0f}%) | {p['reason']}")
 
+    # Player stats summary
+    for team_label, players in [(home_name, home_players), (away_name, away_players)]:
+        notable = [p for p in players if p["shots_per_game"] >= 1.0 or p["fouls_per_game"] >= 1.0]
+        if notable:
+            print(f"\n--- PLAYER STATS: {team_label} ---")
+            print(f"  {'Player':22s} | {'Pos':4s} | {'Apps':4s} | {'Shots/G':7s} | {'SOT/G':6s} | {'Fouls/G':7s}")
+            for p in notable[:10]:
+                print(f"  {p['name']:22s} | {p['position']:4s} | {p['appearances']:4d} | {p['shots_per_game']:7.1f} | {p['sot_per_game']:6.1f} | {p['fouls_per_game']:7.1f}")
+
     # Data summary
     print(f"\n--- DATA SUMMARY ---")
 
@@ -816,11 +1001,16 @@ def generate_html_report(
     missing_markets: list[str],
     home_avgs: dict,
     away_avgs: dict,
+    home_players: list[dict] | None = None,
+    away_players: list[dict] | None = None,
 ) -> str:
     """Generate a styled HTML report and return the file path."""
     import html as html_mod
     import tempfile
     import webbrowser
+
+    home_players = home_players or []
+    away_players = away_players or []
 
     home_name = html_mod.escape(match_info.get("home_name", "Home"))
     away_name = html_mod.escape(match_info.get("away_name", "Away"))
@@ -929,6 +1119,36 @@ def generate_html_report(
         picks_html += f'<details><summary>All Other Picks ({len(rest)})</summary><table class="picks">'
         picks_html += '<tr><th>Category</th><th>Market</th><th>Hit Rate</th><th>Confidence</th><th>Reason</th></tr>'
         picks_html += pick_rows(rest) + '</table></details>'
+
+    # Build player stats section
+    def player_table_html(team_label: str, players: list[dict]) -> str:
+        notable = [p for p in players if p["shots_per_game"] >= 0.5 or p["fouls_per_game"] >= 0.5]
+        if not notable:
+            return ""
+        rows = ""
+        for p in notable[:12]:
+            rows += f"""<tr>
+                <td>{html_mod.escape(p['name'])}</td>
+                <td class="center">{html_mod.escape(p['position'])}</td>
+                <td class="center">{p['appearances']}</td>
+                <td class="center">{p['shots_per_game']:.1f}</td>
+                <td class="center">{p['sot_per_game']:.1f}</td>
+                <td class="center">{p['fouls_per_game']:.1f}</td>
+            </tr>"""
+        return f"""<div class="card">
+            <h3>{html_mod.escape(team_label)}</h3>
+            <table>
+                <tr><th>Player</th><th>Pos</th><th>Apps</th><th>Shots/G</th><th>SOT/G</th><th>Fouls/G</th></tr>
+                {rows}
+            </table>
+        </div>"""
+
+    player_stats_html = ""
+    if home_players or away_players:
+        player_stats_html = f'<h2 class="section-title">Player Stats (Fouls, Shots, SOT)</h2><div class="grid">'
+        player_stats_html += player_table_html(home_name, home_players)
+        player_stats_html += player_table_html(away_name, away_players)
+        player_stats_html += '</div>'
 
     page = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1082,6 +1302,8 @@ def generate_html_report(
     {ctx_rows(home_name, home_ctx)}
     {ctx_rows(away_name, away_ctx)}
 </table>
+
+{player_stats_html}
 
 <h2 class="section-title">Data Summary</h2>
 <div class="grid">
@@ -1280,6 +1502,29 @@ def main():
     away_avgs = compute_team_averages(away_last10)
     picks, missing_markets = compute_hit_rates(home_last10, away_last10)
 
+    # Step 4b: Player stats (fouls, shots, SOT)
+    home_players = []
+    away_players = []
+    if season_id and season_id > 0:
+        print(f"  Fetching player stats...")
+        try:
+            home_players = get_team_players(season_id, home_id)
+            away_players = get_team_players(season_id, away_id)
+            print(f"    {home_name}: {len(home_players)} players | {away_name}: {len(away_players)} players")
+        except Exception as e:
+            print(f"    Player stats unavailable: {e}")
+
+        # Compute player-level picks and merge into picks list
+        player_picks = (
+            compute_player_picks(home_players, home_name)
+            + compute_player_picks(away_players, away_name)
+        )
+        picks.extend(player_picks)
+        if DEBUG:
+            print(f"  [DEBUG] {len(player_picks)} player picks generated")
+    else:
+        print("  Skipping player stats (no season_id)")
+
     # Step 5: Output
     report_args = (
         match_info, home_last10, away_last10,
@@ -1287,10 +1532,10 @@ def main():
         picks, missing_markets,
         home_avgs, away_avgs,
     )
-    format_report(*report_args)
+    format_report(*report_args, home_players=home_players, away_players=away_players)
 
     # Step 6: Generate HTML report and open in browser
-    filepath = generate_html_report(*report_args)
+    filepath = generate_html_report(*report_args, home_players=home_players, away_players=away_players)
     print(f"  HTML report saved to: {filepath}")
     print(f"  Opening in browser...")
 

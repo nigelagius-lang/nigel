@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-from __future__ import annotations
-"""
-Football Match Analysis Tool
-Connects to the FootyStats API to analyze matches and calculate hit rates
-for goals, shots, fouls, cards, corners, and match result markets.
-
-Usage:
-    python football_analysis.py "Arsenal vs Chelsea"
-    python football_analysis.py "Arsenal vs Chelsea" --date 2026-02-15
-    python football_analysis.py --list              # list today's fixtures
-"""
+# Football Match Analysis Tool
+# Connects to the FootyStats API to analyze matches and calculate hit rates
+# for goals, shots, fouls, cards, corners, and match result markets.
+#
+# Usage:
+#     python football_analysis.py "Arsenal vs Chelsea"
+#     python football_analysis.py "Arsenal vs Chelsea" --date 2026-02-15
+#     python football_analysis.py --list              # list today's fixtures
 
 from __future__ import annotations
 

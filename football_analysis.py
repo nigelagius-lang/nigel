@@ -484,6 +484,40 @@ def extract_match_stats(match: dict, team_id: int) -> dict | None:
                      match.get("away_corners",
                      match.get("awayCorners", -1))))
 
+    # Half-time goals
+    home_ht_goals = safe_int(match.get("homeHTGoalCount",
+                      match.get("ht_goals_team_a",
+                      match.get("home_ht_goals", -1))))
+    away_ht_goals = safe_int(match.get("awayHTGoalCount",
+                      match.get("ht_goals_team_b",
+                      match.get("away_ht_goals", -1))))
+
+    # Second-half goals (derived)
+    home_2h_goals = (home_goals - home_ht_goals) if home_goals >= 0 and home_ht_goals >= 0 else -1
+    away_2h_goals = (away_goals - away_ht_goals) if away_goals >= 0 and away_ht_goals >= 0 else -1
+
+    # Half-time corners
+    home_ht_corners = safe_int(match.get("team_a_corners_halftime",
+                        match.get("ht_corners_team_a",
+                        match.get("home_ht_corners", -1))))
+    away_ht_corners = safe_int(match.get("team_b_corners_halftime",
+                        match.get("ht_corners_team_b",
+                        match.get("away_ht_corners", -1))))
+
+    # Second-half corners (derived)
+    home_2h_corners = (home_corners - home_ht_corners) if home_corners >= 0 and home_ht_corners >= 0 else -1
+    away_2h_corners = (away_corners - away_ht_corners) if away_corners >= 0 and away_ht_corners >= 0 else -1
+
+    # Half-time shots (if available)
+    home_ht_shots = safe_int(match.get("team_a_shots_halftime",
+                      match.get("ht_shots_team_a",
+                      match.get("home_ht_shots", -1))))
+    away_ht_shots = safe_int(match.get("team_b_shots_halftime",
+                      match.get("ht_shots_team_b",
+                      match.get("away_ht_shots", -1))))
+    home_2h_shots = (home_shots - home_ht_shots) if home_shots >= 0 and home_ht_shots >= 0 else -1
+    away_2h_shots = (away_shots - away_ht_shots) if away_shots >= 0 and away_ht_shots >= 0 else -1
+
     # Opponent info
     opponent_id = away_id if is_home else home_id
     opponent_name = (match.get("away_name", "") if is_home
@@ -516,6 +550,21 @@ def extract_match_stats(match: dict, team_id: int) -> dict | None:
         "match_reds": (home_reds + away_reds) if home_reds >= 0 and away_reds >= 0 else -1,
         "match_corners": (home_corners + away_corners) if home_corners >= 0 and away_corners >= 0 else -1,
         "match_shots": (home_shots + away_shots) if home_shots >= 0 and away_shots >= 0 else -1,
+        # Half-time / second-half breakdowns
+        "goals_scored_1h": home_ht_goals if is_home else away_ht_goals,
+        "goals_conceded_1h": away_ht_goals if is_home else home_ht_goals,
+        "goals_scored_2h": home_2h_goals if is_home else away_2h_goals,
+        "goals_conceded_2h": away_2h_goals if is_home else home_2h_goals,
+        "total_goals_1h": (home_ht_goals + away_ht_goals) if home_ht_goals >= 0 and away_ht_goals >= 0 else -1,
+        "total_goals_2h": (home_2h_goals + away_2h_goals) if home_2h_goals >= 0 and away_2h_goals >= 0 else -1,
+        "corners_1h": home_ht_corners if is_home else away_ht_corners,
+        "corners_2h": home_2h_corners if is_home else away_2h_corners,
+        "match_corners_1h": (home_ht_corners + away_ht_corners) if home_ht_corners >= 0 and away_ht_corners >= 0 else -1,
+        "match_corners_2h": (home_2h_corners + away_2h_corners) if home_2h_corners >= 0 and away_2h_corners >= 0 else -1,
+        "shots_1h": home_ht_shots if is_home else away_ht_shots,
+        "shots_2h": home_2h_shots if is_home else away_2h_shots,
+        "match_shots_1h": (home_ht_shots + away_ht_shots) if home_ht_shots >= 0 and away_ht_shots >= 0 else -1,
+        "match_shots_2h": (home_2h_shots + away_2h_shots) if home_2h_shots >= 0 and away_2h_shots >= 0 else -1,
         "opponent_id": opponent_id,
         "opponent_name": opponent_name,
     }
@@ -679,7 +728,131 @@ def compute_team_averages(matches: list[dict]) -> dict:
         "avg_yellows": avg([m["yellows"] for m in matches]),
         "avg_reds": avg([m["reds"] for m in matches]),
         "avg_corners": avg([m["corners"] for m in matches]),
+        # Half-by-half breakdowns
+        "avg_goals_scored_1h": avg([m["goals_scored_1h"] for m in matches]),
+        "avg_goals_scored_2h": avg([m["goals_scored_2h"] for m in matches]),
+        "avg_goals_conceded_1h": avg([m["goals_conceded_1h"] for m in matches]),
+        "avg_goals_conceded_2h": avg([m["goals_conceded_2h"] for m in matches]),
+        "avg_corners_1h": avg([m["corners_1h"] for m in matches]),
+        "avg_corners_2h": avg([m["corners_2h"] for m in matches]),
+        "avg_shots_1h": avg([m["shots_1h"] for m in matches]),
+        "avg_shots_2h": avg([m["shots_2h"] for m in matches]),
     }
+
+
+def compute_aggression_profile(matches: list[dict]) -> dict:
+    """
+    Classify a team's attacking intensity and half-by-half pattern.
+    Uses goals, shots, and corners from the last N matches.
+    """
+    home_form = [m for m in matches if m["is_home"]]
+    away_form = [m for m in matches if not m["is_home"]]
+
+    gs_1h = valid([m["goals_scored_1h"] for m in matches])
+    gs_2h = valid([m["goals_scored_2h"] for m in matches])
+    gc_1h = valid([m["goals_conceded_1h"] for m in matches])
+    gc_2h = valid([m["goals_conceded_2h"] for m in matches])
+    c_1h = valid([m["corners_1h"] for m in matches])
+    c_2h = valid([m["corners_2h"] for m in matches])
+    sh_1h = valid([m["shots_1h"] for m in matches])
+    sh_2h = valid([m["shots_2h"] for m in matches])
+
+    avg_gs_1h = sum(gs_1h) / len(gs_1h) if gs_1h else 0
+    avg_gs_2h = sum(gs_2h) / len(gs_2h) if gs_2h else 0
+    avg_gc_1h = sum(gc_1h) / len(gc_1h) if gc_1h else 0
+    avg_gc_2h = sum(gc_2h) / len(gc_2h) if gc_2h else 0
+    avg_c_1h = sum(c_1h) / len(c_1h) if c_1h else 0
+    avg_c_2h = sum(c_2h) / len(c_2h) if c_2h else 0
+    avg_sh_1h = sum(sh_1h) / len(sh_1h) if sh_1h else 0
+    avg_sh_2h = sum(sh_2h) / len(sh_2h) if sh_2h else 0
+
+    total_gs = avg_gs_1h + avg_gs_2h
+    total_gc = avg_gc_1h + avg_gc_2h
+    total_shots = avg([m["shots"] for m in matches])
+    total_corners = avg([m["corners"] for m in matches])
+
+    # Style classification
+    if total_gs >= 1.5 and total_shots >= 12:
+        style = "Aggressive"
+    elif total_gs >= 1.0 or total_shots >= 10:
+        style = "Balanced"
+    else:
+        style = "Defensive"
+
+    # Tempo classification
+    if avg_gs_1h > 0 and avg_gs_2h > 0:
+        if avg_gs_1h > avg_gs_2h * 1.3:
+            tempo = "Fast Starters"
+        elif avg_gs_2h > avg_gs_1h * 1.3:
+            tempo = "Second Half Surgers"
+        else:
+            tempo = "Even Tempo"
+    else:
+        tempo = "Unknown"
+
+    # Home vs away split
+    home_avgs = compute_team_averages(home_form) if home_form else {}
+    away_avgs = compute_team_averages(away_form) if away_form else {}
+
+    return {
+        "style": style,
+        "tempo": tempo,
+        "avg_goals_scored_1h": avg_gs_1h,
+        "avg_goals_scored_2h": avg_gs_2h,
+        "avg_goals_conceded_1h": avg_gc_1h,
+        "avg_goals_conceded_2h": avg_gc_2h,
+        "avg_corners_1h": avg_c_1h,
+        "avg_corners_2h": avg_c_2h,
+        "avg_shots_1h": avg_sh_1h,
+        "avg_shots_2h": avg_sh_2h,
+        "avg_goals_total": total_gs,
+        "avg_conceded_total": total_gc,
+        "avg_shots_total": total_shots,
+        "avg_corners_total": total_corners,
+        "home_avgs": home_avgs,
+        "away_avgs": away_avgs,
+    }
+
+
+def compute_matchup_analysis(home_profile: dict, away_profile: dict,
+                             home_name: str, away_name: str) -> str:
+    """Generate a text analysis of how the two teams' styles match up."""
+    lines = []
+
+    hs, aws = home_profile["style"], away_profile["style"]
+    if hs == "Aggressive" and aws == "Aggressive":
+        lines.append(f"Both {home_name} and {away_name} play aggressively — expect an open, high-tempo game with plenty of shots and corners.")
+    elif hs == "Aggressive" and aws == "Defensive":
+        lines.append(f"{home_name} are aggressive attackers facing a defensive {away_name}. The home side should dominate shots and corners.")
+    elif hs == "Defensive" and aws == "Aggressive":
+        lines.append(f"{away_name} bring attacking intent against a defensively-minded {home_name}. Away corners and shots could be high.")
+    elif hs == "Defensive" and aws == "Defensive":
+        lines.append(f"Both sides tend to play defensively — this could be a tight, low-scoring affair with fewer corners.")
+    else:
+        lines.append(f"{home_name} ({hs}) vs {away_name} ({aws}) — a balanced contest expected.")
+
+    # Tempo insights
+    ht, at = home_profile["tempo"], away_profile["tempo"]
+    if ht == "Fast Starters" and at == "Fast Starters":
+        lines.append("Both teams are fast starters — first half goals are very likely.")
+    elif ht == "Fast Starters" or at == "Fast Starters":
+        starter = home_name if ht == "Fast Starters" else away_name
+        lines.append(f"{starter} tend to score early — look at 1st half goal markets.")
+    if ht == "Second Half Surgers" or at == "Second Half Surgers":
+        surger = home_name if ht == "Second Half Surgers" else away_name
+        lines.append(f"{surger} get stronger in the 2nd half — second half goals are likely.")
+
+    # Corner edge
+    hc = home_profile["avg_corners_total"]
+    ac = away_profile["avg_corners_total"]
+    if hc >= 5 and ac >= 5:
+        lines.append(f"Both sides win lots of corners (avg {hc:.1f} + {ac:.1f}) — match corner overs look strong.")
+    elif hc >= 5:
+        lines.append(f"{home_name} average {hc:.1f} corners/game — look at home team corner overs.")
+    elif ac >= 5:
+        lines.append(f"{away_name} average {ac:.1f} corners/game — look at away team corner overs.")
+
+    return " ".join(lines)
 
 
 def compute_hit_rates(home_matches: list[dict], away_matches: list[dict]) -> list[dict]:
@@ -909,36 +1082,146 @@ def compute_hit_rates(home_matches: list[dict], away_matches: list[dict]) -> lis
     else:
         missing_markets.append("Red cards")
 
-    # Corners per team
+    # ---- CORNERS ----
     home_corners_list = valid([m["corners"] for m in home_matches])
     away_corners_list = valid([m["corners"] for m in away_matches])
+    match_corners_list = valid([m["match_corners"] for m in home_matches]) + \
+                         valid([m["match_corners"] for m in away_matches])
 
-    if home_corners_list:
-        line = sum(home_corners_list) / len(home_corners_list)
-        hits = sum(1 for c in home_corners_list if c > line)
-        picks.append({
-            "category": "FOULS & CARDS",
-            "market": f"Home Team Over {line:.1f} Corners",
-            "selection": f"Over {line:.1f}",
-            "hits": hits,
-            "total": len(home_corners_list),
-            "reason": f"Line set at their last-10 average of {line:.1f} corners",
-        })
+    # Fixed-threshold team corner markets
+    for label, clist, team in [("Home Team", home_corners_list, "home"),
+                                ("Away Team", away_corners_list, "away")]:
+        if clist:
+            c_avg = sum(clist) / len(clist)
+            for thresh in [3.5, 4.5, 5.5, 6.5, 7.5, 8.5]:
+                hits = sum(1 for c in clist if c > thresh)
+                pct = (hits / len(clist) * 100) if clist else 0
+                if pct >= 30:  # only include if meaningful
+                    picks.append({
+                        "category": "CORNERS",
+                        "market": f"{label} Over {thresh:.1f} Corners",
+                        "selection": f"Over {thresh:.1f}",
+                        "hits": hits,
+                        "total": len(clist),
+                        "reason": f"{label} avg {c_avg:.1f} corners/game (last {len(clist)})",
+                    })
 
-    if away_corners_list:
-        line = sum(away_corners_list) / len(away_corners_list)
-        hits = sum(1 for c in away_corners_list if c > line)
-        picks.append({
-            "category": "FOULS & CARDS",
-            "market": f"Away Team Over {line:.1f} Corners",
-            "selection": f"Over {line:.1f}",
-            "hits": hits,
-            "total": len(away_corners_list),
-            "reason": f"Line set at their last-10 average of {line:.1f} corners",
-        })
+    # Match total corner markets
+    if match_corners_list:
+        mc_avg = sum(match_corners_list) / len(match_corners_list)
+        for thresh in [7.5, 8.5, 9.5, 10.5, 11.5, 12.5]:
+            hits = sum(1 for c in match_corners_list if c > thresh)
+            pct = (hits / len(match_corners_list) * 100)
+            if pct >= 30:
+                picks.append({
+                    "category": "CORNERS",
+                    "market": f"Match Total Over {thresh:.1f} Corners",
+                    "selection": f"Over {thresh:.1f}",
+                    "hits": hits,
+                    "total": len(match_corners_list),
+                    "reason": f"Combined avg {mc_avg:.1f} corners/match",
+                })
+
+    # Half-time corner markets
+    home_c1h = valid([m["corners_1h"] for m in home_matches])
+    away_c1h = valid([m["corners_1h"] for m in away_matches])
+    home_c2h = valid([m["corners_2h"] for m in home_matches])
+    away_c2h = valid([m["corners_2h"] for m in away_matches])
+
+    for label, c1h, c2h in [("Home Team", home_c1h, home_c2h),
+                              ("Away Team", away_c1h, away_c2h)]:
+        if c1h:
+            c1h_avg = sum(c1h) / len(c1h)
+            for thresh in [1.5, 2.5, 3.5, 4.5]:
+                hits = sum(1 for c in c1h if c > thresh)
+                pct = (hits / len(c1h) * 100)
+                if pct >= 30:
+                    picks.append({
+                        "category": "CORNERS",
+                        "market": f"{label} 1st Half Over {thresh:.1f} Corners",
+                        "selection": f"Over {thresh:.1f}",
+                        "hits": hits,
+                        "total": len(c1h),
+                        "reason": f"{label} avg {c1h_avg:.1f} corners in 1st half",
+                    })
+        if c2h:
+            c2h_avg = sum(c2h) / len(c2h)
+            for thresh in [1.5, 2.5, 3.5, 4.5]:
+                hits = sum(1 for c in c2h if c > thresh)
+                pct = (hits / len(c2h) * 100)
+                if pct >= 30:
+                    picks.append({
+                        "category": "CORNERS",
+                        "market": f"{label} 2nd Half Over {thresh:.1f} Corners",
+                        "selection": f"Over {thresh:.1f}",
+                        "hits": hits,
+                        "total": len(c2h),
+                        "reason": f"{label} avg {c2h_avg:.1f} corners in 2nd half",
+                    })
 
     if not home_corners_list and not away_corners_list:
         missing_markets.append("Corners")
+
+    # ---- HALF-TIME / SECOND-HALF GOALS ----
+    all_1h = valid([m["total_goals_1h"] for m in home_matches]) + \
+             valid([m["total_goals_1h"] for m in away_matches])
+    all_2h = valid([m["total_goals_2h"] for m in home_matches]) + \
+             valid([m["total_goals_2h"] for m in away_matches])
+
+    if all_1h:
+        avg_1h = sum(all_1h) / len(all_1h)
+        for thresh in [0.5, 1.5, 2.5]:
+            hits = sum(1 for g in all_1h if g > thresh)
+            picks.append({
+                "category": "HALF-TIME GOALS",
+                "market": f"1st Half Over {thresh:.1f} Goals",
+                "selection": f"Over {thresh:.1f}",
+                "hits": hits,
+                "total": len(all_1h),
+                "reason": f"Avg {avg_1h:.1f} goals in 1st half across both teams' games",
+            })
+
+    if all_2h:
+        avg_2h = sum(all_2h) / len(all_2h)
+        for thresh in [0.5, 1.5, 2.5]:
+            hits = sum(1 for g in all_2h if g > thresh)
+            picks.append({
+                "category": "HALF-TIME GOALS",
+                "market": f"2nd Half Over {thresh:.1f} Goals",
+                "selection": f"Over {thresh:.1f}",
+                "hits": hits,
+                "total": len(all_2h),
+                "reason": f"Avg {avg_2h:.1f} goals in 2nd half across both teams' games",
+            })
+
+    # ---- FIRST HALF SHOTS ----
+    all_sh_1h = valid([m["match_shots_1h"] for m in home_matches]) + \
+                valid([m["match_shots_1h"] for m in away_matches])
+    all_sh_2h = valid([m["match_shots_2h"] for m in home_matches]) + \
+                valid([m["match_shots_2h"] for m in away_matches])
+
+    if all_sh_1h:
+        avg_sh1 = sum(all_sh_1h) / len(all_sh_1h)
+        hits = sum(1 for s in all_sh_1h if s > avg_sh1)
+        picks.append({
+            "category": "SHOTS",
+            "market": f"1st Half Match Shots Over {avg_sh1:.1f}",
+            "selection": f"Over {avg_sh1:.1f}",
+            "hits": hits,
+            "total": len(all_sh_1h),
+            "reason": f"Avg {avg_sh1:.1f} combined shots in 1st half",
+        })
+    if all_sh_2h:
+        avg_sh2 = sum(all_sh_2h) / len(all_sh_2h)
+        hits = sum(1 for s in all_sh_2h if s > avg_sh2)
+        picks.append({
+            "category": "SHOTS",
+            "market": f"2nd Half Match Shots Over {avg_sh2:.1f}",
+            "selection": f"Over {avg_sh2:.1f}",
+            "hits": hits,
+            "total": len(all_sh_2h),
+            "reason": f"Avg {avg_sh2:.1f} combined shots in 2nd half",
+        })
 
     # ---- MATCH RESULT ----
     home_results = [(m["goals_scored"], m["goals_conceded"])
@@ -1086,8 +1369,12 @@ def format_report(
 
     def fmt_avg(label, avgs, n):
         parts = [f"Avg GF {avgs['avg_goals_scored']:.1f}"]
+        if avgs.get("avg_goals_scored_1h", 0) > 0 or avgs.get("avg_goals_scored_2h", 0) > 0:
+            parts.append(f"GF 1H/2H {avgs['avg_goals_scored_1h']:.1f}/{avgs['avg_goals_scored_2h']:.1f}")
         if avgs["avg_shots"] > 0:
             parts.append(f"Shots {avgs['avg_shots']:.1f}")
+        if avgs.get("avg_shots_1h", 0) > 0 or avgs.get("avg_shots_2h", 0) > 0:
+            parts.append(f"Shots 1H/2H {avgs['avg_shots_1h']:.1f}/{avgs['avg_shots_2h']:.1f}")
         if avgs["avg_sot"] > 0:
             parts.append(f"SOT {avgs['avg_sot']:.1f}")
         if avgs["avg_fouls"] > 0:
@@ -1096,6 +1383,8 @@ def format_report(
             parts.append(f"Yellows {avgs['avg_yellows']:.1f}")
         if avgs["avg_corners"] > 0:
             parts.append(f"Corners {avgs['avg_corners']:.1f}")
+        if avgs.get("avg_corners_1h", 0) > 0 or avgs.get("avg_corners_2h", 0) > 0:
+            parts.append(f"Corners 1H/2H {avgs['avg_corners_1h']:.1f}/{avgs['avg_corners_2h']:.1f}")
         print(f"  {label} Last {n}: {' | '.join(parts)}")
 
     fmt_avg(home_name, home_avgs, len(home_matches))
@@ -1130,6 +1419,9 @@ def generate_html_report(
     away_avgs: dict,
     home_players: list[dict] | None = None,
     away_players: list[dict] | None = None,
+    home_profile: dict | None = None,
+    away_profile: dict | None = None,
+    matchup_text: str = "",
     write_file: bool = True,
 ) -> str:
     """Generate a styled HTML report. Returns file path (write_file=True) or HTML string."""
@@ -1139,6 +1431,8 @@ def generate_html_report(
 
     home_players = home_players or []
     away_players = away_players or []
+    home_profile = home_profile or {}
+    away_profile = away_profile or {}
 
     home_name = html_mod.escape(match_info.get("home_name", "Home"))
     away_name = html_mod.escape(match_info.get("away_name", "Away"))
@@ -1277,6 +1571,40 @@ def generate_html_report(
         player_stats_html += player_table_html(home_name, home_players)
         player_stats_html += player_table_html(away_name, away_players)
         player_stats_html += '</div>'
+
+    # Build Aggression Profile & Half-by-Half section
+    aggression_html = ""
+    if home_profile and away_profile and (home_profile.get("style") or away_profile.get("style")):
+        def _half_row(label: str, prof: dict) -> str:
+            return f"""<tr>
+                <td><strong>{html_mod.escape(label)}</strong></td>
+                <td class="center">{html_mod.escape(prof.get('style', '-'))}</td>
+                <td class="center">{html_mod.escape(prof.get('tempo', '-'))}</td>
+                <td class="center">{prof.get('avg_goals_scored_1h', 0):.2f}</td>
+                <td class="center">{prof.get('avg_goals_scored_2h', 0):.2f}</td>
+                <td class="center">{prof.get('avg_goals_conceded_1h', 0):.2f}</td>
+                <td class="center">{prof.get('avg_goals_conceded_2h', 0):.2f}</td>
+                <td class="center">{prof.get('avg_shots_1h', 0):.1f}</td>
+                <td class="center">{prof.get('avg_shots_2h', 0):.1f}</td>
+                <td class="center">{prof.get('avg_corners_1h', 0):.1f}</td>
+                <td class="center">{prof.get('avg_corners_2h', 0):.1f}</td>
+            </tr>"""
+
+        matchup_para = ""
+        if matchup_text:
+            matchup_para = f'<div class="card" style="margin-bottom:16px;padding:16px;border-left:3px solid #5ba3d9;"><p style="line-height:1.6;">{html_mod.escape(matchup_text)}</p></div>'
+
+        aggression_html = f"""<h2 class="section-title">Aggression Profile &amp; Half-by-Half Analysis</h2>
+{matchup_para}
+<table>
+    <tr>
+        <th>Team</th><th>Style</th><th>Tempo</th>
+        <th>GF 1H</th><th>GF 2H</th><th>GA 1H</th><th>GA 2H</th>
+        <th>Shots 1H</th><th>Shots 2H</th><th>Corners 1H</th><th>Corners 2H</th>
+    </tr>
+    {_half_row(home_name, home_profile)}
+    {_half_row(away_name, away_profile)}
+</table>"""
 
     page = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1431,6 +1759,8 @@ def generate_html_report(
     {ctx_rows(away_name, away_ctx)}
 </table>
 
+{aggression_html}
+
 {player_stats_html}
 
 <h2 class="section-title">Data Summary</h2>
@@ -1438,20 +1768,28 @@ def generate_html_report(
     <div class="card">
         <h3>{home_name} (Last {len(home_matches)})</h3>
         <div class="stat-row"><span class="stat-label">Avg Goals</span><span class="stat-value">{home_avgs['avg_goals_scored']:.1f}</span></div>
+        <div class="stat-row"><span class="stat-label">Goals 1H / 2H</span><span class="stat-value">{home_avgs.get('avg_goals_scored_1h', 0):.1f} / {home_avgs.get('avg_goals_scored_2h', 0):.1f}</span></div>
+        <div class="stat-row"><span class="stat-label">Conceded 1H / 2H</span><span class="stat-value">{home_avgs.get('avg_goals_conceded_1h', 0):.1f} / {home_avgs.get('avg_goals_conceded_2h', 0):.1f}</span></div>
         <div class="stat-row"><span class="stat-label">Avg Shots</span><span class="stat-value">{home_avgs['avg_shots']:.1f}</span></div>
+        <div class="stat-row"><span class="stat-label">Shots 1H / 2H</span><span class="stat-value">{home_avgs.get('avg_shots_1h', 0):.1f} / {home_avgs.get('avg_shots_2h', 0):.1f}</span></div>
         <div class="stat-row"><span class="stat-label">Avg SOT</span><span class="stat-value">{home_avgs['avg_sot']:.1f}</span></div>
+        <div class="stat-row"><span class="stat-label">Avg Corners</span><span class="stat-value">{home_avgs['avg_corners']:.1f}</span></div>
+        <div class="stat-row"><span class="stat-label">Corners 1H / 2H</span><span class="stat-value">{home_avgs.get('avg_corners_1h', 0):.1f} / {home_avgs.get('avg_corners_2h', 0):.1f}</span></div>
         <div class="stat-row"><span class="stat-label">Avg Fouls</span><span class="stat-value">{home_avgs['avg_fouls']:.1f}</span></div>
         <div class="stat-row"><span class="stat-label">Avg Yellows</span><span class="stat-value">{home_avgs['avg_yellows']:.1f}</span></div>
-        <div class="stat-row"><span class="stat-label">Avg Corners</span><span class="stat-value">{home_avgs['avg_corners']:.1f}</span></div>
     </div>
     <div class="card">
         <h3>{away_name} (Last {len(away_matches)})</h3>
         <div class="stat-row"><span class="stat-label">Avg Goals</span><span class="stat-value">{away_avgs['avg_goals_scored']:.1f}</span></div>
+        <div class="stat-row"><span class="stat-label">Goals 1H / 2H</span><span class="stat-value">{away_avgs.get('avg_goals_scored_1h', 0):.1f} / {away_avgs.get('avg_goals_scored_2h', 0):.1f}</span></div>
+        <div class="stat-row"><span class="stat-label">Conceded 1H / 2H</span><span class="stat-value">{away_avgs.get('avg_goals_conceded_1h', 0):.1f} / {away_avgs.get('avg_goals_conceded_2h', 0):.1f}</span></div>
         <div class="stat-row"><span class="stat-label">Avg Shots</span><span class="stat-value">{away_avgs['avg_shots']:.1f}</span></div>
+        <div class="stat-row"><span class="stat-label">Shots 1H / 2H</span><span class="stat-value">{away_avgs.get('avg_shots_1h', 0):.1f} / {away_avgs.get('avg_shots_2h', 0):.1f}</span></div>
         <div class="stat-row"><span class="stat-label">Avg SOT</span><span class="stat-value">{away_avgs['avg_sot']:.1f}</span></div>
+        <div class="stat-row"><span class="stat-label">Avg Corners</span><span class="stat-value">{away_avgs['avg_corners']:.1f}</span></div>
+        <div class="stat-row"><span class="stat-label">Corners 1H / 2H</span><span class="stat-value">{away_avgs.get('avg_corners_1h', 0):.1f} / {away_avgs.get('avg_corners_2h', 0):.1f}</span></div>
         <div class="stat-row"><span class="stat-label">Avg Fouls</span><span class="stat-value">{away_avgs['avg_fouls']:.1f}</span></div>
         <div class="stat-row"><span class="stat-label">Avg Yellows</span><span class="stat-value">{away_avgs['avg_yellows']:.1f}</span></div>
-        <div class="stat-row"><span class="stat-label">Avg Corners</span><span class="stat-value">{away_avgs['avg_corners']:.1f}</span></div>
     </div>
 </div>
 
@@ -1592,6 +1930,11 @@ def run_analysis(fixture: dict) -> dict:
         away_avgs = compute_team_averages(away_last10)
         picks, missing_markets = compute_hit_rates(home_last10, away_last10)
 
+        # Aggression profiling
+        home_profile = compute_aggression_profile(home_last10)
+        away_profile = compute_aggression_profile(away_last10)
+        matchup_text = compute_matchup_analysis(home_profile, away_profile, home_name, away_name)
+
         home_players = []
         away_players = []
         if season_id and season_id > 0:
@@ -1616,6 +1959,9 @@ def run_analysis(fixture: dict) -> dict:
             home_avgs, away_avgs,
             home_players=home_players,
             away_players=away_players,
+            home_profile=home_profile,
+            away_profile=away_profile,
+            matchup_text=matchup_text,
             write_file=False,
         )
 
@@ -1748,6 +2094,13 @@ def main():
     away_avgs = compute_team_averages(away_last10)
     picks, missing_markets = compute_hit_rates(home_last10, away_last10)
 
+    # Step 4a: Aggression profiling
+    home_profile = compute_aggression_profile(home_last10)
+    away_profile = compute_aggression_profile(away_last10)
+    matchup_text = compute_matchup_analysis(home_profile, away_profile, home_name, away_name)
+    print(f"\n  Aggression: {home_name} ({home_profile['style']}, {home_profile['tempo']})")
+    print(f"  Aggression: {away_name} ({away_profile['style']}, {away_profile['tempo']})")
+
     # Step 4b: Player stats (fouls, shots, SOT)
     home_players = []
     away_players = []
@@ -1784,10 +2137,17 @@ def main():
         picks, missing_markets,
         home_avgs, away_avgs,
     )
+    report_kwargs = dict(
+        home_players=home_players,
+        away_players=away_players,
+        home_profile=home_profile,
+        away_profile=away_profile,
+        matchup_text=matchup_text,
+    )
     format_report(*report_args, home_players=home_players, away_players=away_players)
 
     # Step 6: Generate HTML report and open in browser
-    filepath = generate_html_report(*report_args, home_players=home_players, away_players=away_players)
+    filepath = generate_html_report(*report_args, **report_kwargs)
     print(f"  HTML report saved to: {filepath}")
     print(f"  Opening in browser...")
 

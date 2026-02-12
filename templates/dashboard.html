@@ -56,40 +56,107 @@
   .container { max-width: 1200px; margin: 0 auto; padding: 24px 16px; }
 
   /* Filter bar */
-  .filter-bar {
+  .filter-bar { margin-bottom: 20px; }
+
+  /* Custom country dropdown */
+  .league-dropdown {
+    position: relative;
+    max-width: 340px;
+  }
+  .dropdown-toggle {
+    width: 100%;
     display: flex;
-    gap: 12px;
-    margin-bottom: 20px;
-    flex-wrap: wrap;
-  }
-  .filter-bar input {
-    flex: 1;
-    min-width: 200px;
+    justify-content: space-between;
+    align-items: center;
     padding: 10px 14px;
     background: #162230;
     border: 1px solid #1e3a50;
     border-radius: 8px;
     color: #e0e6ed;
     font-size: 0.9rem;
-    outline: none;
-    transition: border-color 0.2s;
-  }
-  .filter-bar input::placeholder { color: #556677; }
-  .filter-bar input:focus { border-color: #5ba3d9; }
-  .filter-bar select {
-    padding: 10px 14px;
-    background: #162230;
-    border: 1px solid #1e3a50;
-    border-radius: 8px;
-    color: #e0e6ed;
-    font-size: 0.9rem;
-    outline: none;
     cursor: pointer;
-    min-width: 200px;
     transition: border-color 0.2s;
+    user-select: none;
   }
-  .filter-bar select:focus { border-color: #5ba3d9; }
-  .filter-bar select option { background: #162230; color: #e0e6ed; }
+  .dropdown-toggle:hover { border-color: #5ba3d9; }
+  .league-dropdown.open .dropdown-toggle {
+    border-color: #5ba3d9;
+    border-radius: 8px 8px 0 0;
+  }
+  .dropdown-arrow {
+    color: #556677;
+    font-size: 0.7rem;
+    transition: transform 0.2s;
+  }
+  .league-dropdown.open .dropdown-arrow { transform: rotate(180deg); }
+
+  .dropdown-panel {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: #162230;
+    border: 1px solid #1e3a50;
+    border-top: none;
+    border-radius: 0 0 8px 8px;
+    max-height: 420px;
+    overflow-y: auto;
+    z-index: 100;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    padding: 4px 0;
+  }
+  .league-dropdown.open .dropdown-panel { display: block; }
+
+  .dropdown-item {
+    padding: 9px 16px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    color: #e0e6ed;
+    transition: background 0.15s;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .dropdown-item:hover { background: #1a2a3a; }
+  .dropdown-item.selected { color: #5ba3d9; }
+  .dropdown-item .match-count {
+    color: #556677;
+    font-size: 0.8rem;
+  }
+
+  .dropdown-divider {
+    height: 1px;
+    background: #1e3a50;
+    margin: 4px 8px;
+  }
+
+  .dropdown-section-header {
+    padding: 10px 16px 6px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: #5ba3d9;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    user-select: none;
+  }
+  .dropdown-section-header:hover { background: rgba(91,163,217,0.05); }
+  .section-arrow {
+    font-size: 0.6rem;
+    color: #556677;
+    transition: transform 0.2s;
+  }
+  .dropdown-section.collapsed .section-arrow { transform: rotate(-90deg); }
+  .dropdown-section.collapsed .dropdown-section-items { display: none; }
+
+  .dropdown-panel::-webkit-scrollbar { width: 6px; }
+  .dropdown-panel::-webkit-scrollbar-track { background: transparent; }
+  .dropdown-panel::-webkit-scrollbar-thumb { background: #1e3a50; border-radius: 3px; }
+  .dropdown-panel::-webkit-scrollbar-thumb:hover { background: #2a4a60; }
 
   /* League sections */
   .league-section {
@@ -259,8 +326,7 @@
   @media (max-width: 600px) {
     .header { padding: 16px; }
     .match-grid { grid-template-columns: 1fr; }
-    .filter-bar { flex-direction: column; }
-    .filter-bar select { min-width: unset; }
+    .league-dropdown { max-width: 100%; }
   }
 </style>
 </head>
@@ -290,18 +356,57 @@
 <div class="container">
   {% if leagues %}
     <div class="filter-bar">
-      <input type="text" id="searchInput" placeholder="Search by team name...">
-      <select id="leagueFilter">
-        <option value="all">All Leagues ({{ leagues|length }})</option>
-        {% for league_name, cards in leagues.items() %}
-          <option value="{{ league_name }}">{{ league_name }} ({{ cards|length }})</option>
-        {% endfor %}
-      </select>
+      <div class="league-dropdown" id="leagueDropdown">
+        <div class="dropdown-toggle" onclick="toggleDropdown()">
+          <span id="dropdownLabel">All Countries</span>
+          <span class="dropdown-arrow">&#9660;</span>
+        </div>
+        <div class="dropdown-panel">
+          <div class="dropdown-item selected" data-country="all" onclick="selectCountry(this, 'all', 'All Countries')">
+            <span>All Countries</span>
+            <span class="match-count">{{ match_count }}</span>
+          </div>
+
+          {% if top_countries %}
+          <div class="dropdown-divider"></div>
+          <div class="dropdown-section" id="sectionTop">
+            <div class="dropdown-section-header" onclick="toggleSection(event, 'sectionTop')">
+              Top Leagues <span class="section-arrow">&#9660;</span>
+            </div>
+            <div class="dropdown-section-items">
+              {% for country, count in top_countries %}
+              <div class="dropdown-item" data-country="{{ country }}" onclick="selectCountry(this, '{{ country }}', '{{ country }}')">
+                <span>{{ country }}</span>
+                <span class="match-count">{{ count }}</span>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+          {% endif %}
+
+          {% if other_countries %}
+          <div class="dropdown-divider"></div>
+          <div class="dropdown-section" id="sectionOther">
+            <div class="dropdown-section-header" onclick="toggleSection(event, 'sectionOther')">
+              Other Countries <span class="section-arrow">&#9660;</span>
+            </div>
+            <div class="dropdown-section-items">
+              {% for country, count in other_countries %}
+              <div class="dropdown-item" data-country="{{ country }}" onclick="selectCountry(this, '{{ country }}', '{{ country }}')">
+                <span>{{ country }}</span>
+                <span class="match-count">{{ count }}</span>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+          {% endif %}
+        </div>
+      </div>
     </div>
 
     <div id="leagueContainer">
       {% for league_name, cards in leagues.items() %}
-        <div class="league-section" data-league="{{ league_name }}">
+        <div class="league-section" data-league="{{ league_name }}" data-country="{{ league_country.get(league_name, 'Other') }}">
           <div class="league-header" onclick="toggleLeague(this)">
             <h2>{{ league_name }}</h2>
             <div style="display:flex; align-items:center; gap:12px;">
@@ -351,7 +456,7 @@
 
     <div class="no-results" id="noResults">
       <h2>No matches found</h2>
-      <p>Try a different search or league filter.</p>
+      <p>Try selecting a different country.</p>
     </div>
   {% else %}
     <div class="empty-state">
@@ -367,48 +472,48 @@ function toggleLeague(header) {
   header.closest('.league-section').classList.toggle('collapsed');
 }
 
-// League dropdown filter
-const leagueFilter = document.getElementById('leagueFilter');
-const searchInput = document.getElementById('searchInput');
+// Custom country dropdown
+function toggleDropdown() {
+  document.getElementById('leagueDropdown').classList.toggle('open');
+}
 
-function applyFilters() {
-  const selectedLeague = leagueFilter ? leagueFilter.value : 'all';
-  const query = searchInput ? searchInput.value.toLowerCase().trim() : '';
-  let anyVisible = false;
+function toggleSection(e, sectionId) {
+  e.stopPropagation();
+  document.getElementById(sectionId).classList.toggle('collapsed');
+}
 
-  document.querySelectorAll('.league-section').forEach(section => {
-    const leagueName = section.getAttribute('data-league');
-    const leagueMatch = selectedLeague === 'all' || leagueName === selectedLeague;
+function selectCountry(el, country, label) {
+  document.getElementById('dropdownLabel').textContent = label;
 
-    if (!leagueMatch) {
-      section.style.display = 'none';
-      return;
-    }
+  document.querySelectorAll('.dropdown-item').forEach(function(item) {
+    item.classList.toggle('selected', item === el);
+  });
 
-    // Filter cards within visible leagues by search
-    let cardsVisible = 0;
-    section.querySelectorAll('.match-card').forEach(card => {
-      const text = card.getAttribute('data-search') || '';
-      const matches = !query || text.includes(query);
-      card.style.display = matches ? '' : 'none';
-      if (matches) cardsVisible++;
-    });
+  document.getElementById('leagueDropdown').classList.remove('open');
 
-    section.style.display = cardsVisible > 0 ? '' : 'none';
-    if (cardsVisible > 0) anyVisible = true;
-
-    // Auto-expand when filtering
-    if (query && cardsVisible > 0) {
+  // Filter league sections by country
+  var anyVisible = false;
+  document.querySelectorAll('.league-section').forEach(function(section) {
+    var sectionCountry = section.getAttribute('data-country');
+    var show = country === 'all' || sectionCountry === country;
+    section.style.display = show ? '' : 'none';
+    if (show) {
+      anyVisible = true;
       section.classList.remove('collapsed');
     }
   });
 
-  const noResults = document.getElementById('noResults');
+  var noResults = document.getElementById('noResults');
   if (noResults) noResults.style.display = anyVisible ? 'none' : 'block';
 }
 
-if (leagueFilter) leagueFilter.addEventListener('change', applyFilters);
-if (searchInput) searchInput.addEventListener('input', applyFilters);
+// Close dropdown when clicking outside
+document.addEventListener('click', function(e) {
+  var dropdown = document.getElementById('leagueDropdown');
+  if (dropdown && !dropdown.contains(e.target)) {
+    dropdown.classList.remove('open');
+  }
+});
 
 // On-demand analysis
 function analyzeMatch(slug, btn) {

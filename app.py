@@ -141,6 +141,7 @@ def dashboard():
             "home_name": home,
             "away_name": away,
             "league": league,
+            "country": fix.get("country", ""),
             "kick_off": kick_off,
             "kick_off_unix": int(ko_unix) if ko_unix else 0,
             "analyzed": report is not None,
@@ -169,9 +170,27 @@ def dashboard():
         league = c.get("league") or "Other"
         leagues.setdefault(league, []).append(c)
 
+    # Country data for the dropdown
+    TOP_COUNTRIES = ["England", "France", "Germany", "Spain", "Italy"]
+    league_country: dict[str, str] = {}
+    country_counts: dict[str, int] = {}
+    for c in cards:
+        country = c.get("country") or "Other"
+        lg = c.get("league") or "Other"
+        league_country[lg] = country
+        country_counts[country] = country_counts.get(country, 0) + 1
+
+    top_countries = [(ct, country_counts[ct]) for ct in TOP_COUNTRIES if ct in country_counts]
+    other_countries = sorted(
+        [(ct, n) for ct, n in country_counts.items() if ct not in TOP_COUNTRIES]
+    )
+
     return render_template(
         "dashboard.html",
         leagues=leagues,
+        league_country=league_country,
+        top_countries=top_countries,
+        other_countries=other_countries,
         last_refresh=last_refresh,
         refreshing=refreshing,
         match_count=len(cards),

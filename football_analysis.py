@@ -885,9 +885,16 @@ def main():
 
     home_id = int(match_info.get("homeID", match_info.get("home_id", 0)))
     away_id = int(match_info.get("awayID", match_info.get("away_id", 0)))
-    season_id = match_info.get("season_id") or match_info.get("season")
-    if season_id:
-        season_id = int(season_id)
+    # Try to get a numeric season/league ID for table lookups and fallback data
+    season_id = None
+    for key in ("season_id", "competition_id", "league_id", "season"):
+        val = match_info.get(key)
+        if val is not None:
+            try:
+                season_id = int(val)
+                break
+            except (ValueError, TypeError):
+                continue
 
     # Step 2: Pull last 10 matches for both teams
     print(f"  Fetching last 10 for {home_name}...")

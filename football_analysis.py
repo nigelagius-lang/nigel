@@ -174,14 +174,31 @@ def resolve_club_team_id(season_id: int, fixture_team_name: str) -> int | None:
     return best_id if best_score > 0.5 else None
 
 
-def fetch_player_detail(player_id: int) -> dict:
-    """Fetch detailed stats for a single player via /player-stats."""
+def fetch_player_detail(player_id: int, competition_id: int = 0) -> dict:
+    """
+    Fetch detailed stats for a single player via /player-stats.
+    Returns the entry matching competition_id if possible.
+    The 'detailed' sub-object (shots, fouls, etc.) is flattened into the result.
+    """
     data = api_get("player-stats", {"player_id": player_id})
-    if isinstance(data, list) and data:
-        return data[0]
-    if isinstance(data, dict):
-        return data
-    return {}
+    if not isinstance(data, list) or not data:
+        return {}
+
+    # Find the entry for the right competition (e.g. Premier League 15050)
+    best = data[0]
+    if competition_id:
+        for entry in data:
+            if entry.get("competition_id") == competition_id:
+                best = entry
+                break
+
+    # Flatten the 'detailed' sub-object into the main dict
+    detailed = best.get("detailed")
+    if isinstance(detailed, dict):
+        for k, v in detailed.items():
+            if k not in best:
+                best[k] = v
+    return best
 
 
 def safe_float(val, default=0.0) -> float:
@@ -204,7 +221,7 @@ def _extract_detail_stat(detail: dict, *keys: str) -> float:
     return 0.0
 
 
-def get_team_players(season_id: int, club_team_id: int, max_detail: int = 8) -> list[dict]:
+def get_team_players(season_id: int, club_team_id: int, competition_id: int = 0, max_detail: int = 8) -> list[dict]:
     """
     Return player stats for a team.
     1. Gets roster from league-players (matched by club_team_id)
@@ -212,8 +229,11 @@ def get_team_players(season_id: int, club_team_id: int, max_detail: int = 8) -> 
        shots, shots on target, and fouls committed.
     """
     all_players = fetch_league_players(season_id)
+    # Use competition_id from the first player if not provided
+    if not competition_id and all_players:
+        competition_id = all_players[0].get("competition_id", 0)
     if DEBUG:
-        print(f"  [DEBUG] league-players returned {len(all_players)} total, filtering for club_team_id={club_team_id}")
+        print(f"  [DEBUG] league-players returned {len(all_players)} total, filtering for club_team_id={club_team_id}, competition_id={competition_id}")
 
     # Filter to this team's players
     roster = []
@@ -251,14 +271,21 @@ def get_team_players(season_id: int, club_team_id: int, max_detail: int = 8) -> 
         if i < max_detail and player_id:
             if DEBUG:
                 print(f"    [DEBUG] Fetching detail for {name} (id={player_id})...")
-            detail = fetch_player_detail(player_id)
+            detail = fetch_player_detail(player_id, competition_id)
             if DEBUG and i == 0 and detail:
                 import json
-                # Show keys from first detailed player so we can see what fields exist
+                # Show what competition was matched
+                print(f"    [DEBUG] Matched competition: {detail.get('league', '?')} ({detail.get('competition_id', '?')})")
+                # Show keys related to shots/fouls (including from flattened 'detailed')
                 detail_keys = [k for k in sorted(detail.keys()) if "shot" in k.lower() or "foul" in k.lower()]
                 print(f"    [DEBUG] Detail shot/foul keys: {detail_keys}")
-                all_detail_keys = sorted(detail.keys())
-                print(f"    [DEBUG] All detail keys ({len(all_detail_keys)}): {all_detail_keys[:60]}")
+                # Show the raw 'detailed' sub-object if it exists
+                raw_detailed = detail.get("detailed")
+                if isinstance(raw_detailed, dict):
+                    print(f"    [DEBUG] 'detailed' sub-keys: {sorted(raw_detailed.keys())}")
+                    print(f"    [DEBUG] 'detailed' sample: {json.dumps(raw_detailed, indent=2, default=str)[:2000]}")
+                else:
+                    print(f"    [DEBUG] No 'detailed' sub-object found")
 
             # Shots per game — try many possible field names
             shots_pg = _extract_detail_stat(detail,
@@ -1614,8 +1641,8 @@ def main():
         if home_club_id and away_club_id:
             print(f"  Fetching player stats (top 8 per team)...")
             try:
-                home_players = get_team_players(season_id, home_club_id)
-                away_players = get_team_players(season_id, away_club_id)
+                home_players = get_team_players(season_id, home_club_id, competition_id=season_id)
+                away_players = get_team_players(season_id, away_club_id, competition_id=season_id)
                 print(f"    {home_name}: {len(home_players)} players | {away_name}: {len(away_players)} players")
             except Exception as e:
                 print(f"    Player stats unavailable: {e}")

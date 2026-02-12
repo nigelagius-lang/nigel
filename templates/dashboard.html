@@ -39,6 +39,7 @@
   }
   .badge-live { background: #22c55e22; color: #22c55e; border: 1px solid #22c55e44; }
   .badge-count { background: #3b82f622; color: #5ba3d9; border: 1px solid #3b82f644; }
+  .badge-credits { background: #f9731622; color: #f97316; border: 1px solid #f9731644; }
   .refresh-btn {
     background: #1e3a50;
     color: #5ba3d9;
@@ -54,6 +55,23 @@
 
   .container { max-width: 1200px; margin: 0 auto; padding: 24px 16px; }
 
+  .search-bar {
+    margin-bottom: 20px;
+  }
+  .search-bar input {
+    width: 100%;
+    padding: 12px 16px;
+    background: #162230;
+    border: 1px solid #1e3a50;
+    border-radius: 8px;
+    color: #e0e6ed;
+    font-size: 0.95rem;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .search-bar input::placeholder { color: #556677; }
+  .search-bar input:focus { border-color: #5ba3d9; }
+
   .match-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
@@ -66,15 +84,12 @@
     border-radius: 10px;
     padding: 20px;
     transition: border-color 0.2s, transform 0.15s;
-    cursor: pointer;
-    text-decoration: none;
-    color: inherit;
-    display: block;
+    display: flex;
+    flex-direction: column;
   }
-  .match-card:hover {
-    border-color: #5ba3d9;
-    transform: translateY(-2px);
-  }
+  .match-card:hover { border-color: #2a4a60; }
+  .match-card.analyzed { border-left: 3px solid #22c55e; }
+  .match-card.analyzing { border-left: 3px solid #eab308; }
   .match-card.error { border-left: 3px solid #ef4444; }
 
   .match-teams {
@@ -103,10 +118,47 @@
     margin-bottom: 12px;
   }
 
+  .card-actions {
+    margin-top: auto;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .analyze-btn {
+    background: #1e3a50;
+    color: #5ba3d9;
+    border: 1px solid #2a4a60;
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    font-weight: 600;
+    transition: background 0.2s;
+  }
+  .analyze-btn:hover { background: #2a4a60; }
+  .analyze-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .view-btn {
+    background: #22c55e22;
+    color: #22c55e;
+    border: 1px solid #22c55e44;
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-decoration: none;
+    transition: background 0.2s;
+  }
+  .view-btn:hover { background: #22c55e33; }
+
   .picks-summary {
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
+    align-items: center;
   }
   .pick-chip {
     padding: 3px 10px;
@@ -117,6 +169,25 @@
   .pick-hot { background: #22c55e22; color: #22c55e; }
   .pick-warm { background: #eab30822; color: #eab308; }
   .pick-none { background: #55667722; color: #556677; }
+
+  .spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid #eab30844;
+    border-top-color: #eab308;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .analyzing-text {
+    font-size: 0.8rem;
+    color: #eab308;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
 
   .error-msg { color: #ef4444; font-size: 0.85rem; margin-top: 8px; }
 
@@ -140,81 +211,149 @@
     <h1>Football Analysis</h1>
   </div>
   <div class="header-meta">
-    <span class="badge badge-count">{{ match_count }} match{{ 'es' if match_count != 1 }}</span>
+    <span class="badge badge-count">{{ match_count }} fixture{{ 's' if match_count != 1 }}</span>
+    <span class="badge badge-credits">{{ api_credits }} API credits</span>
     {% if last_refresh %}
       <span>Updated {{ last_refresh.strftime('%H:%M UTC') }}</span>
     {% endif %}
     {% if refreshing %}
-      <span class="badge badge-live">Refreshing...</span>
+      <span class="badge badge-live">Loading...</span>
     {% endif %}
     <form action="/refresh" method="post" style="display:inline">
       <button class="refresh-btn" type="submit" {% if refreshing %}disabled{% endif %}>
-        Refresh
+        Refresh Fixtures
       </button>
     </form>
   </div>
 </div>
 
 <div class="container">
-  {% if reports %}
-    <div class="match-grid">
-      {% for r in reports %}
-        {% if r.error %}
-          <div class="match-card error">
-        {% else %}
-          <a href="/report/{{ r.slug }}" class="match-card" target="_blank">
-        {% endif %}
-            <div class="match-teams">
-              <span class="team-name">{{ r.home_name }}</span>
-              <span class="vs">vs</span>
-              <span class="team-name">{{ r.away_name }}</span>
-            </div>
-            <div class="match-meta">
-              <span>{{ r.league }}</span>
-              <span>{{ r.kick_off }}</span>
-            </div>
-            {% if r.error %}
-              <div class="error-msg">{{ r.error }}</div>
-            {% else %}
+  {% if cards %}
+    <div class="search-bar">
+      <input type="text" id="searchInput" placeholder="Search fixtures (team, league...)">
+    </div>
+
+    <div class="match-grid" id="matchGrid">
+      {% for c in cards %}
+        <div class="match-card {% if c.error %}error{% elif c.analyzed %}analyzed{% elif c.analyzing %}analyzing{% endif %}"
+             data-slug="{{ c.slug }}"
+             data-search="{{ c.home_name|lower }} {{ c.away_name|lower }} {{ c.league|lower }}">
+          <div class="match-teams">
+            <span class="team-name">{{ c.home_name }}</span>
+            <span class="vs">vs</span>
+            <span class="team-name">{{ c.away_name }}</span>
+          </div>
+          <div class="match-meta">
+            <span>{{ c.league }}</span>
+            <span>{{ c.kick_off }}</span>
+          </div>
+
+          <div class="card-actions">
+            {% if c.analyzing %}
+              <span class="analyzing-text"><span class="spinner"></span> Analyzing...</span>
+            {% elif c.analyzed and not c.error %}
+              <a href="/report/{{ c.slug }}" class="view-btn" target="_blank">View Report</a>
               <div class="picks-summary">
-                {% set ns = namespace(hot=0, warm=0) %}
-                {% for p in r.picks %}
-                  {% set pct = (p.hits / [p.total, 1]|max) * 100 %}
-                  {% if pct >= 90 %}{% set ns.hot = ns.hot + 1 %}{% endif %}
-                  {% if pct >= 80 and pct < 90 %}{% set ns.warm = ns.warm + 1 %}{% endif %}
-                {% endfor %}
-                {% if ns.hot > 0 %}
-                  <span class="pick-chip pick-hot">{{ ns.hot }} high confidence</span>
-                {% endif %}
-                {% if ns.warm > 0 %}
-                  <span class="pick-chip pick-warm">{{ ns.warm }} likely</span>
-                {% endif %}
-                {% if ns.hot == 0 and ns.warm == 0 %}
+                {% if c.high_pick_count > 0 %}
+                  <span class="pick-chip pick-hot">{{ c.high_pick_count }} strong picks</span>
+                {% else %}
                   <span class="pick-chip pick-none">No strong picks</span>
                 {% endif %}
               </div>
+            {% elif c.error %}
+              <div class="error-msg">{{ c.error }}</div>
+              <button class="analyze-btn" onclick="analyzeMatch('{{ c.slug }}', this)">Retry</button>
+            {% else %}
+              <button class="analyze-btn" onclick="analyzeMatch('{{ c.slug }}', this)">Analyze</button>
             {% endif %}
-        {% if r.error %}
           </div>
-        {% else %}
-          </a>
-        {% endif %}
+        </div>
       {% endfor %}
     </div>
   {% else %}
     <div class="empty-state">
-      <h2>No matches loaded yet</h2>
-      <p>{% if refreshing %}Fetching today's fixtures...{% else %}Click Refresh to load today's fixtures.{% endif %}</p>
+      <h2>No fixtures loaded</h2>
+      <p>{% if refreshing %}Loading today's fixtures...{% else %}Click Refresh Fixtures to load today's matches.{% endif %}</p>
     </div>
   {% endif %}
 </div>
 
-{% if refreshing %}
 <script>
-  // Auto-reload while refreshing
-  setTimeout(() => location.reload(), 15000);
-</script>
+// Search / filter
+const searchInput = document.getElementById('searchInput');
+if (searchInput) {
+  searchInput.addEventListener('input', function() {
+    const query = this.value.toLowerCase();
+    document.querySelectorAll('.match-card').forEach(card => {
+      const text = card.getAttribute('data-search') || '';
+      card.style.display = text.includes(query) ? '' : 'none';
+    });
+  });
+}
+
+// On-demand analysis
+function analyzeMatch(slug, btn) {
+  btn.disabled = true;
+  btn.textContent = '';
+
+  const card = btn.closest('.match-card');
+  card.classList.remove('error');
+  card.classList.add('analyzing');
+
+  // Replace button with spinner
+  const actions = card.querySelector('.card-actions');
+  actions.innerHTML = '<span class="analyzing-text"><span class="spinner"></span> Analyzing...</span>';
+
+  fetch('/analyze/' + slug, { method: 'POST' })
+    .then(() => pollStatus(slug, card))
+    .catch(() => {
+      actions.innerHTML = '<div class="error-msg">Request failed</div>' +
+        '<button class="analyze-btn" onclick="analyzeMatch(\'' + slug + '\', this)">Retry</button>';
+      card.classList.remove('analyzing');
+      card.classList.add('error');
+    });
+}
+
+function pollStatus(slug, card) {
+  const poll = setInterval(() => {
+    fetch('/api/analyze-status/' + slug)
+      .then(r => r.json())
+      .then(data => {
+        if (data.status === 'done') {
+          clearInterval(poll);
+          card.classList.remove('analyzing');
+          const actions = card.querySelector('.card-actions');
+          if (data.error) {
+            card.classList.add('error');
+            actions.innerHTML = '<div class="error-msg">' + data.error + '</div>' +
+              '<button class="analyze-btn" onclick="analyzeMatch(\'' + slug + '\', this)">Retry</button>';
+          } else {
+            card.classList.add('analyzed');
+            let chips = '';
+            if (data.high_pick_count > 0) {
+              chips = '<span class="pick-chip pick-hot">' + data.high_pick_count + ' strong picks</span>';
+            } else {
+              chips = '<span class="pick-chip pick-none">No strong picks</span>';
+            }
+            actions.innerHTML =
+              '<a href="/report/' + slug + '" class="view-btn" target="_blank">View Report</a>' +
+              '<div class="picks-summary">' + chips + '</div>';
+          }
+          // Update credits badge
+          fetch('/api/status').then(r => r.json()).then(s => {
+            const badge = document.querySelector('.badge-credits');
+            if (badge) badge.textContent = s.api_credits_used + ' API credits';
+          });
+        }
+      });
+  }, 3000);
+}
+
+{% if refreshing %}
+// Auto-reload while fixture list is loading
+setTimeout(() => location.reload(), 5000);
 {% endif %}
+</script>
 
 </body>
 </html>

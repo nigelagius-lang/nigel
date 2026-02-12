@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 Football Analysis Dashboard — auto-updating web app.
 

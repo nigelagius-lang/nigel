@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 Football Match Analysis Tool
 Connects to the FootyStats API to analyze matches and calculate hit rates

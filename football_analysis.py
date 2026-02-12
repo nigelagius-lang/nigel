@@ -122,11 +122,55 @@ def fetch_league_players(season_id: int) -> list[dict]:
     """Fetch all players for a league season. Results are cached per season_id."""
     if season_id in _league_players_cache:
         return _league_players_cache[season_id]
-    data = api_get("league-players", {"season_id": season_id})
+    data = api_get("league-players", {"season_id": season_id, "max_per_page": 1000})
     if not isinstance(data, list):
         data = []
     _league_players_cache[season_id] = data
     return data
+
+
+_league_teams_cache: dict[int, list[dict]] = {}
+
+def fetch_league_teams(season_id: int) -> list[dict]:
+    """Fetch all teams in a league season."""
+    if season_id in _league_teams_cache:
+        return _league_teams_cache[season_id]
+    data = api_get("league-teams", {"season_id": season_id})
+    if not isinstance(data, list):
+        data = []
+    _league_teams_cache[season_id] = data
+    return data
+
+
+def resolve_club_team_id(season_id: int, fixture_team_name: str) -> int | None:
+    """
+    Map a fixture team name to the club_team_id used in league-players.
+    Uses league-teams endpoint to find the correct ID by fuzzy name match.
+    """
+    teams = fetch_league_teams(season_id)
+    best_id, best_score = None, 0.0
+    for t in teams:
+        t_name = t.get("name", t.get("team_name", t.get("cleanName", "")))
+        t_id = t.get("id") or t.get("team_id")
+        if not t_name or not t_id:
+            continue
+        score = similarity(fixture_team_name, t_name)
+        if score > best_score:
+            best_score = score
+            best_id = int(t_id)
+    if DEBUG:
+        print(f"  [DEBUG] resolve_club_team_id('{fixture_team_name}') -> {best_id} (score={best_score:.2f})")
+    return best_id if best_score > 0.5 else None
+
+
+def fetch_player_detail(player_id: int) -> dict:
+    """Fetch detailed stats for a single player via /player-stats."""
+    data = api_get("player-stats", {"player_id": player_id})
+    if isinstance(data, list) and data:
+        return data[0]
+    if isinstance(data, dict):
+        return data
+    return {}
 
 
 def safe_float(val, default=0.0) -> float:
@@ -138,74 +182,116 @@ def safe_float(val, default=0.0) -> float:
         return default
 
 
-def get_team_players(season_id: int, team_id: int) -> list[dict]:
+def _extract_detail_stat(detail: dict, *keys: str) -> float:
+    """Try multiple keys on a player-stats response, return the first valid float."""
+    for k in keys:
+        v = detail.get(k)
+        if v is not None:
+            f = safe_float(v)
+            if f > 0:
+                return f
+    return 0.0
+
+
+def get_team_players(season_id: int, club_team_id: int, max_detail: int = 8) -> list[dict]:
     """
-    Return player stats for a given team from the league-players endpoint.
-    Extracts fouls, shots, and shots on target into a normalised dict.
+    Return player stats for a team.
+    1. Gets roster from league-players (matched by club_team_id)
+    2. Fetches detailed stats (/player-stats) for top players to get
+       shots, shots on target, and fouls committed.
     """
     all_players = fetch_league_players(season_id)
-    if DEBUG and all_players:
-        import json
-        print(f"  [DEBUG] league-players returned {len(all_players)} players")
-        print(f"  [DEBUG] First player keys: {sorted(all_players[0].keys())}")
-        print(f"  [DEBUG] First player sample:\n{json.dumps(all_players[0], indent=2, default=str)[:3000]}")
-        # Show all team IDs found
-        team_ids_found = set()
-        for p in all_players:
-            for k in ("club_team_id", "team_id", "teamId", "currentTeamId"):
-                if p.get(k) is not None:
-                    team_ids_found.add((k, p.get(k)))
-        print(f"  [DEBUG] Looking for team_id={team_id}")
-        print(f"  [DEBUG] Sample team ID fields found: {list(team_ids_found)[:10]}")
-    team_players = []
+    if DEBUG:
+        print(f"  [DEBUG] league-players returned {len(all_players)} total, filtering for club_team_id={club_team_id}")
+
+    # Filter to this team's players
+    roster = []
     for p in all_players:
-        pid_team = p.get("club_team_id") or p.get("team_id") or p.get("teamId")
+        pid_team = p.get("club_team_id")
         if pid_team is None:
             continue
-        if int(pid_team) != team_id:
+        if int(pid_team) != club_team_id:
             continue
-
-        appearances = safe_int(p.get("appearances_overall", p.get("appearances", 0)), 0)
+        appearances = safe_int(p.get("appearances_overall", 0), 0)
         if appearances < 1:
             continue
+        roster.append(p)
 
-        name = p.get("known_as") or p.get("full_name") or p.get("player_name") or "Unknown"
+    # Sort by appearances descending — fetch detail for the top N
+    roster.sort(key=lambda x: safe_int(x.get("appearances_overall", 0), 0), reverse=True)
+    if DEBUG:
+        print(f"  [DEBUG] Found {len(roster)} players for club_team_id={club_team_id}")
+
+    team_players = []
+    for i, p in enumerate(roster):
+        player_id = p.get("id")
+        name = p.get("known_as") or p.get("full_name") or "Unknown"
         position = p.get("position", "")
+        appearances = safe_int(p.get("appearances_overall", 0), 0)
 
-        # Shots – try per-game averages first, then totals
-        shots_total = safe_float(p.get("shots_overall", p.get("total_shots", 0)))
-        shots_per_game = safe_float(p.get("shots_per_game", p.get("shots_per_90_overall", 0)))
-        if shots_per_game == 0 and shots_total > 0 and appearances > 0:
-            shots_per_game = shots_total / appearances
+        shots_pg = 0.0
+        sot_pg = 0.0
+        fouls_pg = 0.0
+        shots_total = 0.0
+        sot_total = 0.0
+        fouls_total = 0.0
 
-        sot_total = safe_float(p.get("shots_on_target_overall", p.get("total_shots_on_target", 0)))
-        sot_per_game = safe_float(p.get("shots_on_target_per_game",
-                        p.get("shots_on_target_per_90_overall", 0)))
-        if sot_per_game == 0 and sot_total > 0 and appearances > 0:
-            sot_per_game = sot_total / appearances
+        # Fetch detailed stats for top players (by appearances)
+        if i < max_detail and player_id:
+            if DEBUG:
+                print(f"    [DEBUG] Fetching detail for {name} (id={player_id})...")
+            detail = fetch_player_detail(player_id)
+            if DEBUG and i == 0 and detail:
+                import json
+                # Show keys from first detailed player so we can see what fields exist
+                detail_keys = [k for k in sorted(detail.keys()) if "shot" in k.lower() or "foul" in k.lower()]
+                print(f"    [DEBUG] Detail shot/foul keys: {detail_keys}")
+                all_detail_keys = sorted(detail.keys())
+                print(f"    [DEBUG] All detail keys ({len(all_detail_keys)}): {all_detail_keys[:60]}")
 
-        # Fouls committed
-        fouls_total = safe_float(p.get("fouls_committed_overall",
-                       p.get("fouls_committed", p.get("total_fouls_committed", 0))))
-        fouls_per_game = safe_float(p.get("fouls_committed_per_game",
-                          p.get("fouls_committed_per_90_overall", 0)))
-        if fouls_per_game == 0 and fouls_total > 0 and appearances > 0:
-            fouls_per_game = fouls_total / appearances
+            # Shots per game — try many possible field names
+            shots_pg = _extract_detail_stat(detail,
+                "shots_per_game", "shots_per_90_overall",
+                "shots_per_90", "avg_shots_per_game")
+            shots_total = _extract_detail_stat(detail,
+                "shots_overall", "total_shots_overall",
+                "total_shots", "shots_total")
+            if shots_pg == 0 and shots_total > 0 and appearances > 0:
+                shots_pg = shots_total / appearances
+
+            # Shots on target per game
+            sot_pg = _extract_detail_stat(detail,
+                "shots_on_target_per_game", "shots_on_target_per_90_overall",
+                "shots_on_target_per_90", "avg_shots_on_target_per_game")
+            sot_total = _extract_detail_stat(detail,
+                "shots_on_target_overall", "total_shots_on_target",
+                "shots_on_target_total")
+            if sot_pg == 0 and sot_total > 0 and appearances > 0:
+                sot_pg = sot_total / appearances
+
+            # Fouls committed per game
+            fouls_pg = _extract_detail_stat(detail,
+                "fouls_committed_per_game", "fouls_committed_per_90_overall",
+                "fouls_per_game", "fouls_per_90",
+                "avg_fouls_committed_per_game")
+            fouls_total = _extract_detail_stat(detail,
+                "fouls_committed_overall", "fouls_committed",
+                "total_fouls_committed", "fouls_overall")
+            if fouls_pg == 0 and fouls_total > 0 and appearances > 0:
+                fouls_pg = fouls_total / appearances
 
         team_players.append({
             "name": name,
             "position": position,
             "appearances": appearances,
             "shots_total": shots_total,
-            "shots_per_game": shots_per_game,
+            "shots_per_game": shots_pg,
             "sot_total": sot_total,
-            "sot_per_game": sot_per_game,
+            "sot_per_game": sot_pg,
             "fouls_total": fouls_total,
-            "fouls_per_game": fouls_per_game,
+            "fouls_per_game": fouls_pg,
         })
 
-    # Sort by appearances descending (most likely starters first)
-    team_players.sort(key=lambda x: x["appearances"], reverse=True)
     return team_players
 
 
@@ -223,20 +309,12 @@ def compute_player_picks(players: list[dict], team_name: str) -> list[dict]:
         apps = p["appearances"]
 
         # --- Player Shots ---
-        if p["shots_total"] > 0:
+        if p["shots_total"] > 0 or p["shots_per_game"] > 0:
             for threshold in [0.5, 1.5, 2.5, 3.5]:
-                games_over = 0
-                # We use average to estimate: if avg >= threshold + 0.5, very likely
-                # But better: use total / appearances to get games_over estimate
-                # Since we don't have per-match data, use Poisson-like estimate
                 avg = p["shots_per_game"]
+                total = p["shots_total"] if p["shots_total"] > 0 else avg * apps
                 if avg > 0:
-                    # Estimate hit rate from average using simple model
-                    # P(X > threshold) ~ portion of games where shots > threshold
-                    # With just averages, approximate: if avg > threshold, >50% likely
-                    # Use a simple heuristic: hit_rate = min(avg / (threshold + 0.5), 1.0)
-                    # Better: use total and appearances
-                    games_over = _estimate_games_over(p["shots_total"], apps, threshold)
+                    games_over = _estimate_games_over(total, apps, threshold)
                     pct = (games_over / apps * 100) if apps > 0 else 0
                     if pct >= 50:
                         picks.append({
@@ -248,11 +326,12 @@ def compute_player_picks(players: list[dict], team_name: str) -> list[dict]:
                         })
 
         # --- Player Shots on Target ---
-        if p["sot_total"] > 0:
+        if p["sot_total"] > 0 or p["sot_per_game"] > 0:
             for threshold in [0.5, 1.5, 2.5]:
                 avg = p["sot_per_game"]
+                total = p["sot_total"] if p["sot_total"] > 0 else avg * apps
                 if avg > 0:
-                    games_over = _estimate_games_over(p["sot_total"], apps, threshold)
+                    games_over = _estimate_games_over(total, apps, threshold)
                     pct = (games_over / apps * 100) if apps > 0 else 0
                     if pct >= 50:
                         picks.append({
@@ -264,11 +343,12 @@ def compute_player_picks(players: list[dict], team_name: str) -> list[dict]:
                         })
 
         # --- Player Fouls Committed ---
-        if p["fouls_total"] > 0:
+        if p["fouls_total"] > 0 or p["fouls_per_game"] > 0:
             for threshold in [0.5, 1.5, 2.5]:
                 avg = p["fouls_per_game"]
+                total = p["fouls_total"] if p["fouls_total"] > 0 else avg * apps
                 if avg > 0:
-                    games_over = _estimate_games_over(p["fouls_total"], apps, threshold)
+                    games_over = _estimate_games_over(total, apps, threshold)
                     pct = (games_over / apps * 100) if apps > 0 else 0
                     if pct >= 50:
                         picks.append({
@@ -291,9 +371,7 @@ def _estimate_games_over(total: float, apps: int, threshold: float) -> int:
     if apps <= 0 or total <= 0:
         return 0
     lam = total / apps  # average per game (lambda)
-    # P(X > threshold) = 1 - P(X <= floor(threshold))
     k = int(threshold)  # e.g. threshold 0.5 -> k=0, threshold 1.5 -> k=1
-    # Poisson CDF: P(X <= k) = sum_{i=0}^{k} e^{-lam} * lam^i / i!
     cdf = 0.0
     for i in range(k + 1):
         cdf += math.exp(-lam) * (lam ** i) / math.factorial(i)
@@ -1519,13 +1597,19 @@ def main():
     home_players = []
     away_players = []
     if season_id and season_id > 0:
-        print(f"  Fetching player stats...")
-        try:
-            home_players = get_team_players(season_id, home_id)
-            away_players = get_team_players(season_id, away_id)
-            print(f"    {home_name}: {len(home_players)} players | {away_name}: {len(away_players)} players")
-        except Exception as e:
-            print(f"    Player stats unavailable: {e}")
+        print(f"  Resolving team IDs for player data...")
+        home_club_id = resolve_club_team_id(season_id, home_name)
+        away_club_id = resolve_club_team_id(season_id, away_name)
+        if home_club_id and away_club_id:
+            print(f"  Fetching player stats (top 8 per team)...")
+            try:
+                home_players = get_team_players(season_id, home_club_id)
+                away_players = get_team_players(season_id, away_club_id)
+                print(f"    {home_name}: {len(home_players)} players | {away_name}: {len(away_players)} players")
+            except Exception as e:
+                print(f"    Player stats unavailable: {e}")
+        else:
+            print(f"  Could not resolve team IDs for player lookup")
 
         # Compute player-level picks and merge into picks list
         player_picks = (

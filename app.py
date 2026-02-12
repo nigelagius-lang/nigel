@@ -18,6 +18,143 @@ load_dotenv()
 # Import analysis engine
 import football_analysis as fa
 
+# ---------------------------------------------------------------------------
+# League-to-country mapping (fallback when API doesn't provide country)
+# ---------------------------------------------------------------------------
+LEAGUE_COUNTRY_MAP = {
+    # England
+    "premier league": "England",
+    "championship": "England",
+    "league one": "England",
+    "league two": "England",
+    "national league": "England",
+    "fa cup": "England",
+    "efl cup": "England",
+    "carabao cup": "England",
+    "community shield": "England",
+    # Germany
+    "bundesliga": "Germany",
+    "2. bundesliga": "Germany",
+    "3. liga": "Germany",
+    "dfb pokal": "Germany",
+    "dfb-pokal": "Germany",
+    # France
+    "ligue 1": "France",
+    "ligue 2": "France",
+    "coupe de france": "France",
+    # Italy
+    "serie a": "Italy",
+    "serie b": "Italy",
+    "coppa italia": "Italy",
+    # Spain
+    "la liga": "Spain",
+    "laliga": "Spain",
+    "segunda division": "Spain",
+    "segunda": "Spain",
+    "copa del rey": "Spain",
+    # Netherlands
+    "eredivisie": "Netherlands",
+    "eerste divisie": "Netherlands",
+    # Portugal
+    "primeira liga": "Portugal",
+    "liga portugal": "Portugal",
+    # Belgium
+    "jupiler pro league": "Belgium",
+    "pro league": "Belgium",
+    # Turkey
+    "super lig": "Turkey",
+    "süper lig": "Turkey",
+    # Scotland
+    "scottish premiership": "Scotland",
+    "scottish championship": "Scotland",
+    # Greece
+    "super league": "Greece",
+    # Austria
+    "austrian bundesliga": "Austria",
+    # Switzerland
+    "super league": "Switzerland",
+    "swiss super league": "Switzerland",
+    # Denmark
+    "superliga": "Denmark",
+    "superligaen": "Denmark",
+    # Sweden
+    "allsvenskan": "Sweden",
+    # Norway
+    "eliteserien": "Norway",
+    # Poland
+    "ekstraklasa": "Poland",
+    # Czech Republic
+    "czech first league": "Czech Republic",
+    # Russia
+    "russian premier league": "Russia",
+    # Ukraine
+    "ukrainian premier league": "Ukraine",
+    # USA
+    "mls": "USA",
+    "major league soccer": "USA",
+    # Brazil
+    "serie a": "Brazil",
+    "brasileirao": "Brazil",
+    # Argentina
+    "liga profesional": "Argentina",
+    "primera division": "Argentina",
+    # Mexico
+    "liga mx": "Mexico",
+    # Australia
+    "a-league": "Australia",
+    # Japan
+    "j1 league": "Japan",
+    "j-league": "Japan",
+    # South Korea
+    "k league": "South Korea",
+    "k league 1": "South Korea",
+    # China
+    "chinese super league": "China",
+    # Saudi Arabia
+    "saudi pro league": "Saudi Arabia",
+    # International
+    "champions league": "Europe",
+    "europa league": "Europe",
+    "conference league": "Europe",
+    "euro": "Europe",
+    "world cup": "International",
+    "copa america": "International",
+    "nations league": "Europe",
+    "africa cup": "Africa",
+    "asian cup": "Asia",
+}
+
+
+def _guess_country(fixture: dict) -> str:
+    """Determine country from fixture data, using API field or league name."""
+    # 1. Try API-provided country field
+    country = (fixture.get("country") or "").strip()
+    if country:
+        return country
+
+    # 2. Try matching league name against our map
+    league = (
+        fixture.get("league_name")
+        or fixture.get("competition_name")
+        or ""
+    ).strip()
+    league_lower = league.lower()
+
+    # Exact match
+    if league_lower in LEAGUE_COUNTRY_MAP:
+        return LEAGUE_COUNTRY_MAP[league_lower]
+
+    # Partial/substring match
+    for pattern, mapped_country in LEAGUE_COUNTRY_MAP.items():
+        if pattern in league_lower or league_lower in pattern:
+            return mapped_country
+
+    # 3. Check if league name starts with "Country - League" format
+    if " - " in league:
+        return league.split(" - ", 1)[0].strip()
+
+    return "Other"
+
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "dev-key-change-me")
 
@@ -141,7 +278,7 @@ def dashboard():
             "home_name": home,
             "away_name": away,
             "league": league,
-            "country": fix.get("country", ""),
+            "country": _guess_country(fix),
             "kick_off": kick_off,
             "kick_off_unix": int(ko_unix) if ko_unix else 0,
             "analyzed": report is not None,

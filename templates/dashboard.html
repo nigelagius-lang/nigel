@@ -119,7 +119,7 @@
     align-items: center;
   }
   .dropdown-item:hover { background: #1a2a3a; }
-  .dropdown-item.selected { color: #5ba3d9; }
+  .dropdown-item.selected { color: #5ba3d9; font-weight: 600; }
   .dropdown-item .match-count {
     color: #556677;
     font-size: 0.8rem;
@@ -131,27 +131,15 @@
     margin: 4px 8px;
   }
 
-  .dropdown-section-header {
-    padding: 10px 16px 6px;
-    font-size: 0.7rem;
+  .dropdown-section-label {
+    padding: 10px 16px 4px;
+    font-size: 0.65rem;
     font-weight: 700;
-    color: #5ba3d9;
+    color: #556677;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
-    cursor: pointer;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
+    letter-spacing: 0.8px;
     user-select: none;
   }
-  .dropdown-section-header:hover { background: rgba(91,163,217,0.05); }
-  .section-arrow {
-    font-size: 0.6rem;
-    color: #556677;
-    transition: transform 0.2s;
-  }
-  .dropdown-section.collapsed .section-arrow { transform: rotate(-90deg); }
-  .dropdown-section.collapsed .dropdown-section-items { display: none; }
 
   .dropdown-panel::-webkit-scrollbar { width: 6px; }
   .dropdown-panel::-webkit-scrollbar-track { background: transparent; }
@@ -369,36 +357,24 @@
 
           {% if top_countries %}
           <div class="dropdown-divider"></div>
-          <div class="dropdown-section" id="sectionTop">
-            <div class="dropdown-section-header" onclick="toggleSection(event, 'sectionTop')">
-              Top Leagues <span class="section-arrow">&#9660;</span>
-            </div>
-            <div class="dropdown-section-items">
-              {% for country, count in top_countries %}
-              <div class="dropdown-item" data-country="{{ country }}" onclick="selectCountry(this, '{{ country }}', '{{ country }}')">
-                <span>{{ country }}</span>
-                <span class="match-count">{{ count }}</span>
-              </div>
-              {% endfor %}
-            </div>
+          <div class="dropdown-section-label">Top Leagues</div>
+          {% for country, count in top_countries %}
+          <div class="dropdown-item" data-country="{{ country }}" onclick="selectCountry(this, '{{ country }}', '{{ country }}')">
+            <span>{{ country }}</span>
+            <span class="match-count">{{ count }}</span>
           </div>
+          {% endfor %}
           {% endif %}
 
           {% if other_countries %}
           <div class="dropdown-divider"></div>
-          <div class="dropdown-section" id="sectionOther">
-            <div class="dropdown-section-header" onclick="toggleSection(event, 'sectionOther')">
-              Other Countries <span class="section-arrow">&#9660;</span>
-            </div>
-            <div class="dropdown-section-items">
-              {% for country, count in other_countries %}
-              <div class="dropdown-item" data-country="{{ country }}" onclick="selectCountry(this, '{{ country }}', '{{ country }}')">
-                <span>{{ country }}</span>
-                <span class="match-count">{{ count }}</span>
-              </div>
-              {% endfor %}
-            </div>
+          <div class="dropdown-section-label">Other Countries</div>
+          {% for country, count in other_countries %}
+          <div class="dropdown-item" data-country="{{ country }}" onclick="selectCountry(this, '{{ country }}', '{{ country }}')">
+            <span>{{ country }}</span>
+            <span class="match-count">{{ count }}</span>
           </div>
+          {% endfor %}
           {% endif %}
         </div>
       </div>
@@ -477,28 +453,27 @@ function toggleDropdown() {
   document.getElementById('leagueDropdown').classList.toggle('open');
 }
 
-function toggleSection(e, sectionId) {
-  e.stopPropagation();
-  document.getElementById(sectionId).classList.toggle('collapsed');
-}
-
 function selectCountry(el, country, label) {
+  // Update dropdown label
   document.getElementById('dropdownLabel').textContent = label;
 
+  // Highlight selected item
   document.querySelectorAll('.dropdown-item').forEach(function(item) {
     item.classList.toggle('selected', item === el);
   });
 
+  // Close dropdown
   document.getElementById('leagueDropdown').classList.remove('open');
 
   // Filter league sections by country
   var anyVisible = false;
   document.querySelectorAll('.league-section').forEach(function(section) {
     var sectionCountry = section.getAttribute('data-country');
-    var show = country === 'all' || sectionCountry === country;
+    var show = (country === 'all') || (sectionCountry === country);
     section.style.display = show ? '' : 'none';
     if (show) {
       anyVisible = true;
+      // Expand the section so matches are visible
       section.classList.remove('collapsed');
     }
   });

@@ -103,11 +103,16 @@ def fetch_lastx(team_id: int) -> list[dict]:
     return []
 
 
+_league_matches_cache: dict[int, list[dict]] = {}
+
 def fetch_league_matches(season_id: int) -> list[dict]:
-    """Fetch completed matches for a season (fallback for lastx)."""
+    """Fetch completed matches for a season. Results are cached per season_id."""
+    if season_id in _league_matches_cache:
+        return _league_matches_cache[season_id]
     data = api_get("league-matches", {"season_id": season_id, "max_per_page": 500})
     if not isinstance(data, list):
-        return []
+        data = []
+    _league_matches_cache[season_id] = data
     return data
 
 
@@ -266,14 +271,10 @@ def find_match(fixtures: list[dict], query: str) -> dict | None:
 def get_team_last10(team_id: int, season_id: int | None = None) -> list[dict]:
     """
     Get extracted stats for a team's last 10 matches.
-    Tries /lastx first, falls back to /league-matches.
+    Uses /league-matches to get individual match data.
     """
-    try:
-        raw = fetch_lastx(team_id)
-    except Exception:
-        raw = []
-
-    if not raw and season_id:
+    raw = []
+    if season_id:
         try:
             all_matches = fetch_league_matches(season_id)
             # Filter to completed matches involving team_id
@@ -285,7 +286,9 @@ def get_team_last10(team_id: int, season_id: int | None = None) -> list[dict]:
             # Sort by date descending, take last 10
             raw.sort(key=lambda m: m.get("date_unix", 0), reverse=True)
             raw = raw[:10]
-        except Exception:
+        except Exception as e:
+            if DEBUG:
+                print(f"  [DEBUG] league-matches failed: {e}")
             raw = []
 
     results = []
@@ -901,16 +904,22 @@ def main():
 
     home_id = int(match_info.get("homeID", match_info.get("home_id", 0)))
     away_id = int(match_info.get("awayID", match_info.get("away_id", 0)))
-    # Try to get a numeric season/league ID for table lookups and fallback data
+    # Try to get a numeric season/league ID for table lookups and match history
     season_id = None
-    for key in ("season_id", "competition_id", "league_id", "season"):
+    for key in ("competition_id", "season_id", "league_id", "season"):
         val = match_info.get(key)
         if val is not None:
             try:
                 season_id = int(val)
-                break
+                if season_id > 0:
+                    break
             except (ValueError, TypeError):
                 continue
+    if DEBUG:
+        print(f"  [DEBUG] Using season_id={season_id}")
+
+    if not season_id or season_id <= 0:
+        print("  Warning: Could not determine league ID. Match history may be unavailable.")
 
     # Step 2: Pull last 10 matches for both teams
     print(f"  Fetching last 10 for {home_name}...")

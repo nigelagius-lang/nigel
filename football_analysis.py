@@ -803,6 +803,334 @@ def format_report(
 
 
 # ---------------------------------------------------------------------------
+# HTML report generation
+# ---------------------------------------------------------------------------
+
+def generate_html_report(
+    match_info: dict,
+    home_matches: list[dict],
+    away_matches: list[dict],
+    home_ctx: dict,
+    away_ctx: dict,
+    picks: list[dict],
+    missing_markets: list[str],
+    home_avgs: dict,
+    away_avgs: dict,
+) -> str:
+    """Generate a styled HTML report and return the file path."""
+    import html as html_mod
+    import tempfile
+    import webbrowser
+
+    home_name = html_mod.escape(match_info.get("home_name", "Home"))
+    away_name = html_mod.escape(match_info.get("away_name", "Away"))
+    league = html_mod.escape(match_info.get("league_name", match_info.get("competition_name", "Unknown League")))
+    if league == "Unknown League":
+        league = html_mod.escape(
+            match_info.get("competition", {}).get("name", "Unknown League")
+            if isinstance(match_info.get("competition"), dict) else "Unknown League"
+        )
+
+    kick_off_unix = match_info.get("date_unix", 0)
+    if kick_off_unix:
+        kick_off = datetime.fromtimestamp(int(kick_off_unix), tz=timezone.utc).strftime("%H:%M UTC")
+    else:
+        kick_off = match_info.get("time", match_info.get("ko_time", "TBD"))
+
+    # Rate and sort picks
+    rated_picks = []
+    for p in picks:
+        pct = (p["hits"] / p["total"] * 100) if p["total"] > 0 else 0
+        rated_picks.append({**p, "pct": pct})
+    rated_picks.sort(key=lambda x: x["pct"], reverse=True)
+
+    tier90 = [p for p in rated_picks if p["pct"] >= 90]
+    tier80 = [p for p in rated_picks if 80 <= p["pct"] < 90]
+    tier70 = [p for p in rated_picks if 70 <= p["pct"] < 80]
+    rest = [p for p in rated_picks if p["pct"] < 70]
+
+    def pick_rows(picks_list: list[dict]) -> str:
+        rows = ""
+        for p in picks_list:
+            pct = p["pct"]
+            if pct >= 90:
+                badge = '<span class="badge badge-hot">90%+</span>'
+            elif pct >= 80:
+                badge = '<span class="badge badge-warm">80%+</span>'
+            elif pct >= 70:
+                badge = '<span class="badge badge-mid">70%+</span>'
+            else:
+                badge = f'<span class="badge badge-low">{pct:.0f}%</span>'
+            rows += f"""<tr>
+                <td>{html_mod.escape(p['category'])}</td>
+                <td><strong>{html_mod.escape(p['market'])}</strong></td>
+                <td class="center">{p['hits']}/{p['total']}</td>
+                <td class="center">{badge}</td>
+                <td>{html_mod.escape(p['reason'])}</td>
+            </tr>"""
+        return rows
+
+    def ctx_rows(team_name: str, ctx: dict) -> str:
+        rows = ""
+        if ctx["vs_top"]:
+            a = compute_team_averages(ctx["vs_top"])
+            rows += f'<tr><td>{html_mod.escape(team_name)}</td><td>vs Top Half</td><td>{len(ctx["vs_top"])}</td><td>{a["avg_goals_scored"]:.1f}</td><td>{a["avg_goals_conceded"]:.1f}</td></tr>'
+        if ctx["vs_bottom"]:
+            a = compute_team_averages(ctx["vs_bottom"])
+            rows += f'<tr><td>{html_mod.escape(team_name)}</td><td>vs Bottom Half</td><td>{len(ctx["vs_bottom"])}</td><td>{a["avg_goals_scored"]:.1f}</td><td>{a["avg_goals_conceded"]:.1f}</td></tr>'
+        if ctx["home_form"]:
+            a = compute_team_averages(ctx["home_form"])
+            rows += f'<tr><td>{html_mod.escape(team_name)}</td><td>Home Form</td><td>{len(ctx["home_form"])}</td><td>{a["avg_goals_scored"]:.1f}</td><td>{a["avg_goals_conceded"]:.1f}</td></tr>'
+        if ctx["away_form"]:
+            a = compute_team_averages(ctx["away_form"])
+            rows += f'<tr><td>{html_mod.escape(team_name)}</td><td>Away Form</td><td>{len(ctx["away_form"])}</td><td>{a["avg_goals_scored"]:.1f}</td><td>{a["avg_goals_conceded"]:.1f}</td></tr>'
+        return rows
+
+    def summary_row(label: str, avgs: dict, n: int) -> str:
+        cells = [
+            f"<td><strong>{html_mod.escape(label)}</strong></td>",
+            f"<td>{n}</td>",
+            f"<td>{avgs['avg_goals_scored']:.1f}</td>",
+            f"<td>{avgs['avg_shots']:.1f}</td>" if avgs["avg_shots"] > 0 else "<td>-</td>",
+            f"<td>{avgs['avg_sot']:.1f}</td>" if avgs["avg_sot"] > 0 else "<td>-</td>",
+            f"<td>{avgs['avg_fouls']:.1f}</td>" if avgs["avg_fouls"] > 0 else "<td>-</td>",
+            f"<td>{avgs['avg_yellows']:.1f}</td>" if avgs["avg_yellows"] > 0 else "<td>-</td>",
+            f"<td>{avgs['avg_corners']:.1f}</td>" if avgs["avg_corners"] > 0 else "<td>-</td>",
+        ]
+        return "<tr>" + "".join(cells) + "</tr>"
+
+    combined_goals = valid([m["total_goals"] for m in home_matches]) + \
+                     valid([m["total_goals"] for m in away_matches])
+    combined_avg = f"{sum(combined_goals)/len(combined_goals):.2f}" if combined_goals else "-"
+
+    missing_note = ""
+    if missing_markets:
+        missing_note = f'<p class="missing">Data unavailable for: {html_mod.escape(", ".join(missing_markets))}</p>'
+
+    # Build tier sections
+    picks_html = ""
+    if tier90:
+        picks_html += f'<h2 class="section-title hot">90%+ Likely Picks</h2><table class="picks">'
+        picks_html += '<tr><th>Category</th><th>Market</th><th>Hit Rate</th><th>Confidence</th><th>Reason</th></tr>'
+        picks_html += pick_rows(tier90) + '</table>'
+    if tier80:
+        picks_html += f'<h2 class="section-title warm">80-89% Likely Picks</h2><table class="picks">'
+        picks_html += '<tr><th>Category</th><th>Market</th><th>Hit Rate</th><th>Confidence</th><th>Reason</th></tr>'
+        picks_html += pick_rows(tier80) + '</table>'
+    if tier70:
+        picks_html += f'<h2 class="section-title mid">70-79% Picks</h2><table class="picks">'
+        picks_html += '<tr><th>Category</th><th>Market</th><th>Hit Rate</th><th>Confidence</th><th>Reason</th></tr>'
+        picks_html += pick_rows(tier70) + '</table>'
+    if not tier90 and not tier80 and not tier70:
+        picks_html += f'<h2 class="section-title">Top Picks (below 70%)</h2><table class="picks">'
+        picks_html += '<tr><th>Category</th><th>Market</th><th>Hit Rate</th><th>Confidence</th><th>Reason</th></tr>'
+        picks_html += pick_rows(rest[:10]) + '</table>'
+    elif rest:
+        picks_html += f'<details><summary>All Other Picks ({len(rest)})</summary><table class="picks">'
+        picks_html += '<tr><th>Category</th><th>Market</th><th>Hit Rate</th><th>Confidence</th><th>Reason</th></tr>'
+        picks_html += pick_rows(rest) + '</table></details>'
+
+    page = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{home_name} vs {away_name} | Match Analysis</title>
+<style>
+    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+    body {{
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        background: #0f1923;
+        color: #e0e6ed;
+        padding: 24px;
+        max-width: 1100px;
+        margin: 0 auto;
+    }}
+    .header {{
+        background: linear-gradient(135deg, #1a2a3a, #243447);
+        border-radius: 12px;
+        padding: 32px;
+        margin-bottom: 24px;
+        text-align: center;
+        border: 1px solid #2d4a5e;
+    }}
+    .header h1 {{
+        font-size: 28px;
+        color: #fff;
+        margin-bottom: 8px;
+    }}
+    .header .vs {{ color: #5ba3d9; font-weight: 400; }}
+    .header .meta {{
+        color: #8a9bb0;
+        font-size: 14px;
+        margin-top: 4px;
+    }}
+    .section-title {{
+        font-size: 18px;
+        margin: 28px 0 12px;
+        padding: 10px 16px;
+        border-radius: 8px;
+        background: #1a2a3a;
+        border-left: 4px solid #5ba3d9;
+    }}
+    .section-title.hot {{ border-left-color: #22c55e; color: #22c55e; }}
+    .section-title.warm {{ border-left-color: #eab308; color: #eab308; }}
+    .section-title.mid {{ border-left-color: #f97316; color: #f97316; }}
+    table {{
+        width: 100%;
+        border-collapse: collapse;
+        margin-bottom: 16px;
+        background: #162029;
+        border-radius: 8px;
+        overflow: hidden;
+    }}
+    th {{
+        background: #1a2a3a;
+        color: #8a9bb0;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        padding: 10px 14px;
+        text-align: left;
+    }}
+    td {{
+        padding: 10px 14px;
+        border-top: 1px solid #1e3040;
+        font-size: 14px;
+    }}
+    tr:hover td {{ background: #1a2a3a; }}
+    .center {{ text-align: center; }}
+    .badge {{
+        display: inline-block;
+        padding: 3px 10px;
+        border-radius: 12px;
+        font-size: 12px;
+        font-weight: 600;
+    }}
+    .badge-hot {{ background: #22c55e22; color: #22c55e; border: 1px solid #22c55e44; }}
+    .badge-warm {{ background: #eab30822; color: #eab308; border: 1px solid #eab30844; }}
+    .badge-mid {{ background: #f9731622; color: #f97316; border: 1px solid #f9731644; }}
+    .badge-low {{ background: #64748b22; color: #94a3b8; border: 1px solid #64748b44; }}
+    details {{
+        margin-top: 16px;
+    }}
+    summary {{
+        cursor: pointer;
+        color: #5ba3d9;
+        font-size: 14px;
+        padding: 8px 0;
+    }}
+    .grid {{
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+        margin-bottom: 24px;
+    }}
+    .card {{
+        background: #162029;
+        border-radius: 8px;
+        padding: 20px;
+        border: 1px solid #1e3040;
+    }}
+    .card h3 {{
+        font-size: 14px;
+        color: #5ba3d9;
+        margin-bottom: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }}
+    .stat-row {{
+        display: flex;
+        justify-content: space-between;
+        padding: 4px 0;
+        font-size: 14px;
+    }}
+    .stat-label {{ color: #8a9bb0; }}
+    .stat-value {{ font-weight: 600; }}
+    .footer {{
+        text-align: center;
+        color: #4a5e73;
+        font-size: 12px;
+        margin-top: 32px;
+        padding-top: 16px;
+        border-top: 1px solid #1e3040;
+    }}
+    .missing {{
+        color: #f97316;
+        font-size: 13px;
+        margin-top: 12px;
+        font-style: italic;
+    }}
+    @media (max-width: 700px) {{
+        .grid {{ grid-template-columns: 1fr; }}
+        body {{ padding: 12px; }}
+    }}
+</style>
+</head>
+<body>
+
+<div class="header">
+    <h1>{home_name} <span class="vs">vs</span> {away_name}</h1>
+    <div class="meta">{league} &middot; {kick_off}</div>
+</div>
+
+{picks_html}
+
+<h2 class="section-title">Contextual Analysis</h2>
+<table>
+    <tr><th>Team</th><th>Context</th><th>Games</th><th>Avg GF</th><th>Avg GA</th></tr>
+    {ctx_rows(home_name, home_ctx)}
+    {ctx_rows(away_name, away_ctx)}
+</table>
+
+<h2 class="section-title">Data Summary</h2>
+<div class="grid">
+    <div class="card">
+        <h3>{home_name} (Last {len(home_matches)})</h3>
+        <div class="stat-row"><span class="stat-label">Avg Goals</span><span class="stat-value">{home_avgs['avg_goals_scored']:.1f}</span></div>
+        <div class="stat-row"><span class="stat-label">Avg Shots</span><span class="stat-value">{home_avgs['avg_shots']:.1f}</span></div>
+        <div class="stat-row"><span class="stat-label">Avg SOT</span><span class="stat-value">{home_avgs['avg_sot']:.1f}</span></div>
+        <div class="stat-row"><span class="stat-label">Avg Fouls</span><span class="stat-value">{home_avgs['avg_fouls']:.1f}</span></div>
+        <div class="stat-row"><span class="stat-label">Avg Yellows</span><span class="stat-value">{home_avgs['avg_yellows']:.1f}</span></div>
+        <div class="stat-row"><span class="stat-label">Avg Corners</span><span class="stat-value">{home_avgs['avg_corners']:.1f}</span></div>
+    </div>
+    <div class="card">
+        <h3>{away_name} (Last {len(away_matches)})</h3>
+        <div class="stat-row"><span class="stat-label">Avg Goals</span><span class="stat-value">{away_avgs['avg_goals_scored']:.1f}</span></div>
+        <div class="stat-row"><span class="stat-label">Avg Shots</span><span class="stat-value">{away_avgs['avg_shots']:.1f}</span></div>
+        <div class="stat-row"><span class="stat-label">Avg SOT</span><span class="stat-value">{away_avgs['avg_sot']:.1f}</span></div>
+        <div class="stat-row"><span class="stat-label">Avg Fouls</span><span class="stat-value">{away_avgs['avg_fouls']:.1f}</span></div>
+        <div class="stat-row"><span class="stat-label">Avg Yellows</span><span class="stat-value">{away_avgs['avg_yellows']:.1f}</span></div>
+        <div class="stat-row"><span class="stat-label">Avg Corners</span><span class="stat-value">{away_avgs['avg_corners']:.1f}</span></div>
+    </div>
+</div>
+
+<p style="text-align:center; color:#8a9bb0; font-size:14px;">
+    Combined avg goals per match: <strong>{combined_avg}</strong>
+</p>
+
+{missing_note}
+
+<div class="footer">
+    Generated by Football Analysis Tool &middot; FootyStats API &middot; {api_credits_used} API credits used
+</div>
+
+</body>
+</html>"""
+
+    # Write to a temp file and open in browser
+    report_dir = os.path.dirname(os.path.abspath(__file__))
+    safe_home = home_name.replace(" ", "_").lower()
+    safe_away = away_name.replace(" ", "_").lower()
+    filepath = os.path.join(report_dir, f"report_{safe_home}_vs_{safe_away}.html")
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(page)
+
+    webbrowser.open(f"file://{filepath}")
+    return filepath
+
+
+# ---------------------------------------------------------------------------
 # List fixtures mode
 # ---------------------------------------------------------------------------
 
@@ -953,12 +1281,18 @@ def main():
     picks, missing_markets = compute_hit_rates(home_last10, away_last10)
 
     # Step 5: Output
-    format_report(
+    report_args = (
         match_info, home_last10, away_last10,
         home_ctx, away_ctx,
         picks, missing_markets,
         home_avgs, away_avgs,
     )
+    format_report(*report_args)
+
+    # Step 6: Generate HTML report and open in browser
+    filepath = generate_html_report(*report_args)
+    print(f"  HTML report saved to: {filepath}")
+    print(f"  Opening in browser...")
 
 
 if __name__ == "__main__":

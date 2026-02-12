@@ -162,9 +162,16 @@ def dashboard():
     # Sort by kick-off time
     cards.sort(key=lambda c: c.get("kick_off_unix", 0))
 
+    # Group by league (preserving kick-off order within each group)
+    from collections import OrderedDict
+    leagues: OrderedDict[str, list] = OrderedDict()
+    for c in cards:
+        league = c.get("league") or "Other"
+        leagues.setdefault(league, []).append(c)
+
     return render_template(
         "dashboard.html",
-        cards=cards,
+        leagues=leagues,
         last_refresh=last_refresh,
         refreshing=refreshing,
         match_count=len(cards),

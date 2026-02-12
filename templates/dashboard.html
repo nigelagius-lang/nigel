@@ -55,27 +55,81 @@
 
   .container { max-width: 1200px; margin: 0 auto; padding: 24px 16px; }
 
-  .search-bar {
+  /* Filter bar */
+  .filter-bar {
+    display: flex;
+    gap: 12px;
     margin-bottom: 20px;
+    flex-wrap: wrap;
   }
-  .search-bar input {
-    width: 100%;
-    padding: 12px 16px;
+  .filter-bar input {
+    flex: 1;
+    min-width: 200px;
+    padding: 10px 14px;
     background: #162230;
     border: 1px solid #1e3a50;
     border-radius: 8px;
     color: #e0e6ed;
-    font-size: 0.95rem;
+    font-size: 0.9rem;
     outline: none;
     transition: border-color 0.2s;
   }
-  .search-bar input::placeholder { color: #556677; }
-  .search-bar input:focus { border-color: #5ba3d9; }
+  .filter-bar input::placeholder { color: #556677; }
+  .filter-bar input:focus { border-color: #5ba3d9; }
+  .filter-bar select {
+    padding: 10px 14px;
+    background: #162230;
+    border: 1px solid #1e3a50;
+    border-radius: 8px;
+    color: #e0e6ed;
+    font-size: 0.9rem;
+    outline: none;
+    cursor: pointer;
+    min-width: 200px;
+    transition: border-color 0.2s;
+  }
+  .filter-bar select:focus { border-color: #5ba3d9; }
+  .filter-bar select option { background: #162230; color: #e0e6ed; }
+
+  /* League sections */
+  .league-section {
+    margin-bottom: 28px;
+  }
+  .league-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    background: #1a2a3a;
+    border: 1px solid #1e3a50;
+    border-radius: 8px;
+    margin-bottom: 12px;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.2s;
+  }
+  .league-header:hover { background: #1e3040; }
+  .league-header h2 {
+    font-size: 1rem;
+    color: #5ba3d9;
+    font-weight: 600;
+  }
+  .league-header .league-count {
+    font-size: 0.8rem;
+    color: #8899aa;
+  }
+  .league-header .toggle-icon {
+    color: #556677;
+    font-size: 0.85rem;
+    transition: transform 0.2s;
+  }
+  .league-section.collapsed .toggle-icon { transform: rotate(-90deg); }
+  .league-section.collapsed .match-grid { display: none; }
 
   .match-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-    gap: 16px;
+    gap: 12px;
   }
 
   .match-card {
@@ -96,7 +150,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 12px;
+    margin-bottom: 10px;
   }
   .team-name {
     font-size: 1.05rem;
@@ -110,9 +164,6 @@
   .vs { color: #556677; font-size: 0.85rem; padding: 0 8px; }
 
   .match-meta {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
     font-size: 0.8rem;
     color: #8899aa;
     margin-bottom: 12px;
@@ -198,9 +249,18 @@
   }
   .empty-state h2 { font-size: 1.2rem; margin-bottom: 8px; color: #8899aa; }
 
+  .no-results {
+    text-align: center;
+    padding: 40px 20px;
+    color: #556677;
+    display: none;
+  }
+
   @media (max-width: 600px) {
     .header { padding: 16px; }
     .match-grid { grid-template-columns: 1fr; }
+    .filter-bar { flex-direction: column; }
+    .filter-bar select { min-width: unset; }
   }
 </style>
 </head>
@@ -228,47 +288,70 @@
 </div>
 
 <div class="container">
-  {% if cards %}
-    <div class="search-bar">
-      <input type="text" id="searchInput" placeholder="Search fixtures (team, league...)">
+  {% if leagues %}
+    <div class="filter-bar">
+      <input type="text" id="searchInput" placeholder="Search by team name...">
+      <select id="leagueFilter">
+        <option value="all">All Leagues ({{ leagues|length }})</option>
+        {% for league_name, cards in leagues.items() %}
+          <option value="{{ league_name }}">{{ league_name }} ({{ cards|length }})</option>
+        {% endfor %}
+      </select>
     </div>
 
-    <div class="match-grid" id="matchGrid">
-      {% for c in cards %}
-        <div class="match-card {% if c.error %}error{% elif c.analyzed %}analyzed{% elif c.analyzing %}analyzing{% endif %}"
-             data-slug="{{ c.slug }}"
-             data-search="{{ c.home_name|lower }} {{ c.away_name|lower }} {{ c.league|lower }}">
-          <div class="match-teams">
-            <span class="team-name">{{ c.home_name }}</span>
-            <span class="vs">vs</span>
-            <span class="team-name">{{ c.away_name }}</span>
+    <div id="leagueContainer">
+      {% for league_name, cards in leagues.items() %}
+        <div class="league-section" data-league="{{ league_name }}">
+          <div class="league-header" onclick="toggleLeague(this)">
+            <h2>{{ league_name }}</h2>
+            <div style="display:flex; align-items:center; gap:12px;">
+              <span class="league-count">{{ cards|length }} match{{ 'es' if cards|length != 1 }}</span>
+              <span class="toggle-icon">&#9660;</span>
+            </div>
           </div>
-          <div class="match-meta">
-            <span>{{ c.league }}</span>
-            <span>{{ c.kick_off }}</span>
-          </div>
+          <div class="match-grid">
+            {% for c in cards %}
+              <div class="match-card {% if c.error %}error{% elif c.analyzed %}analyzed{% elif c.analyzing %}analyzing{% endif %}"
+                   data-slug="{{ c.slug }}"
+                   data-search="{{ c.home_name|lower }} {{ c.away_name|lower }}">
+                <div class="match-teams">
+                  <span class="team-name">{{ c.home_name }}</span>
+                  <span class="vs">vs</span>
+                  <span class="team-name">{{ c.away_name }}</span>
+                </div>
+                <div class="match-meta">
+                  {{ c.kick_off }}
+                </div>
 
-          <div class="card-actions">
-            {% if c.analyzing %}
-              <span class="analyzing-text"><span class="spinner"></span> Analyzing...</span>
-            {% elif c.analyzed and not c.error %}
-              <a href="/report/{{ c.slug }}" class="view-btn" target="_blank">View Report</a>
-              <div class="picks-summary">
-                {% if c.high_pick_count > 0 %}
-                  <span class="pick-chip pick-hot">{{ c.high_pick_count }} strong picks</span>
-                {% else %}
-                  <span class="pick-chip pick-none">No strong picks</span>
-                {% endif %}
+                <div class="card-actions">
+                  {% if c.analyzing %}
+                    <span class="analyzing-text"><span class="spinner"></span> Analyzing...</span>
+                  {% elif c.analyzed and not c.error %}
+                    <a href="/report/{{ c.slug }}" class="view-btn" target="_blank">View Report</a>
+                    <div class="picks-summary">
+                      {% if c.high_pick_count > 0 %}
+                        <span class="pick-chip pick-hot">{{ c.high_pick_count }} strong picks</span>
+                      {% else %}
+                        <span class="pick-chip pick-none">No strong picks</span>
+                      {% endif %}
+                    </div>
+                  {% elif c.error %}
+                    <div class="error-msg">{{ c.error }}</div>
+                    <button class="analyze-btn" onclick="analyzeMatch('{{ c.slug }}', this)">Retry</button>
+                  {% else %}
+                    <button class="analyze-btn" onclick="analyzeMatch('{{ c.slug }}', this)">Analyze</button>
+                  {% endif %}
+                </div>
               </div>
-            {% elif c.error %}
-              <div class="error-msg">{{ c.error }}</div>
-              <button class="analyze-btn" onclick="analyzeMatch('{{ c.slug }}', this)">Retry</button>
-            {% else %}
-              <button class="analyze-btn" onclick="analyzeMatch('{{ c.slug }}', this)">Analyze</button>
-            {% endif %}
+            {% endfor %}
           </div>
         </div>
       {% endfor %}
+    </div>
+
+    <div class="no-results" id="noResults">
+      <h2>No matches found</h2>
+      <p>Try a different search or league filter.</p>
     </div>
   {% else %}
     <div class="empty-state">
@@ -279,17 +362,53 @@
 </div>
 
 <script>
-// Search / filter
-const searchInput = document.getElementById('searchInput');
-if (searchInput) {
-  searchInput.addEventListener('input', function() {
-    const query = this.value.toLowerCase();
-    document.querySelectorAll('.match-card').forEach(card => {
-      const text = card.getAttribute('data-search') || '';
-      card.style.display = text.includes(query) ? '' : 'none';
-    });
-  });
+// Toggle league section collapse
+function toggleLeague(header) {
+  header.closest('.league-section').classList.toggle('collapsed');
 }
+
+// League dropdown filter
+const leagueFilter = document.getElementById('leagueFilter');
+const searchInput = document.getElementById('searchInput');
+
+function applyFilters() {
+  const selectedLeague = leagueFilter ? leagueFilter.value : 'all';
+  const query = searchInput ? searchInput.value.toLowerCase().trim() : '';
+  let anyVisible = false;
+
+  document.querySelectorAll('.league-section').forEach(section => {
+    const leagueName = section.getAttribute('data-league');
+    const leagueMatch = selectedLeague === 'all' || leagueName === selectedLeague;
+
+    if (!leagueMatch) {
+      section.style.display = 'none';
+      return;
+    }
+
+    // Filter cards within visible leagues by search
+    let cardsVisible = 0;
+    section.querySelectorAll('.match-card').forEach(card => {
+      const text = card.getAttribute('data-search') || '';
+      const matches = !query || text.includes(query);
+      card.style.display = matches ? '' : 'none';
+      if (matches) cardsVisible++;
+    });
+
+    section.style.display = cardsVisible > 0 ? '' : 'none';
+    if (cardsVisible > 0) anyVisible = true;
+
+    // Auto-expand when filtering
+    if (query && cardsVisible > 0) {
+      section.classList.remove('collapsed');
+    }
+  });
+
+  const noResults = document.getElementById('noResults');
+  if (noResults) noResults.style.display = anyVisible ? 'none' : 'block';
+}
+
+if (leagueFilter) leagueFilter.addEventListener('change', applyFilters);
+if (searchInput) searchInput.addEventListener('input', applyFilters);
 
 // On-demand analysis
 function analyzeMatch(slug, btn) {
@@ -300,7 +419,6 @@ function analyzeMatch(slug, btn) {
   card.classList.remove('error');
   card.classList.add('analyzing');
 
-  // Replace button with spinner
   const actions = card.querySelector('.card-actions');
   actions.innerHTML = '<span class="analyzing-text"><span class="spinner"></span> Analyzing...</span>';
 
@@ -339,7 +457,6 @@ function pollStatus(slug, card) {
               '<a href="/report/' + slug + '" class="view-btn" target="_blank">View Report</a>' +
               '<div class="picks-summary">' + chips + '</div>';
           }
-          // Update credits badge
           fetch('/api/status').then(r => r.json()).then(s => {
             const badge = document.querySelector('.badge-credits');
             if (badge) badge.textContent = s.api_credits_used + ' API credits';
@@ -350,7 +467,6 @@ function pollStatus(slug, card) {
 }
 
 {% if refreshing %}
-// Auto-reload while fixture list is loading
 setTimeout(() => location.reload(), 5000);
 {% endif %}
 </script>

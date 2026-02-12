@@ -1473,11 +1473,14 @@ def generate_html_report(
                 badge = '<span class="badge badge-mid">70%+</span>'
             else:
                 badge = f'<span class="badge badge-low">{pct:.0f}%</span>'
+            odds_val = p.get("odds", 0)
+            odds_cell = f"{odds_val:.2f}" if odds_val > 0 else "-"
             rows += f"""<tr>
                 <td>{html_mod.escape(p['category'])}</td>
                 <td><strong>{html_mod.escape(p['market'])}</strong></td>
                 <td class="center">{p['hits']}/{p['total']}</td>
                 <td class="center">{badge}</td>
+                <td class="center">{odds_cell}</td>
                 <td>{html_mod.escape(p['reason'])}</td>
             </tr>"""
         return rows
@@ -1523,23 +1526,23 @@ def generate_html_report(
     picks_html = ""
     if tier90:
         picks_html += f'<h2 class="section-title hot">90%+ Likely Picks</h2><table class="picks">'
-        picks_html += '<tr><th>Category</th><th>Market</th><th>Hit Rate</th><th>Confidence</th><th>Reason</th></tr>'
+        picks_html += '<tr><th>Category</th><th>Market</th><th>Hit Rate</th><th>Confidence</th><th>Odds</th><th>Reason</th></tr>'
         picks_html += pick_rows(tier90) + '</table>'
     if tier80:
         picks_html += f'<h2 class="section-title warm">80-89% Likely Picks</h2><table class="picks">'
-        picks_html += '<tr><th>Category</th><th>Market</th><th>Hit Rate</th><th>Confidence</th><th>Reason</th></tr>'
+        picks_html += '<tr><th>Category</th><th>Market</th><th>Hit Rate</th><th>Confidence</th><th>Odds</th><th>Reason</th></tr>'
         picks_html += pick_rows(tier80) + '</table>'
     if tier70:
         picks_html += f'<h2 class="section-title mid">70-79% Picks</h2><table class="picks">'
-        picks_html += '<tr><th>Category</th><th>Market</th><th>Hit Rate</th><th>Confidence</th><th>Reason</th></tr>'
+        picks_html += '<tr><th>Category</th><th>Market</th><th>Hit Rate</th><th>Confidence</th><th>Odds</th><th>Reason</th></tr>'
         picks_html += pick_rows(tier70) + '</table>'
     if not tier90 and not tier80 and not tier70:
         picks_html += f'<h2 class="section-title">Top Picks (below 70%)</h2><table class="picks">'
-        picks_html += '<tr><th>Category</th><th>Market</th><th>Hit Rate</th><th>Confidence</th><th>Reason</th></tr>'
+        picks_html += '<tr><th>Category</th><th>Market</th><th>Hit Rate</th><th>Confidence</th><th>Odds</th><th>Reason</th></tr>'
         picks_html += pick_rows(rest[:10]) + '</table>'
     elif rest:
         picks_html += f'<details><summary>All Other Picks ({len(rest)})</summary><table class="picks">'
-        picks_html += '<tr><th>Category</th><th>Market</th><th>Hit Rate</th><th>Confidence</th><th>Reason</th></tr>'
+        picks_html += '<tr><th>Category</th><th>Market</th><th>Hit Rate</th><th>Confidence</th><th>Odds</th><th>Reason</th></tr>'
         picks_html += pick_rows(rest) + '</table></details>'
 
     # Build player stats section
@@ -1855,6 +1858,105 @@ def list_fixtures(date_str: str | None = None):
 
 
 # ---------------------------------------------------------------------------
+# Odds extraction & filtering
+# ---------------------------------------------------------------------------
+
+# Minimum decimal odds threshold — picks below this are filtered out as low value
+MIN_ODDS = 1.40
+
+
+def extract_odds(fixture: dict) -> dict[str, float]:
+    """
+    Pull pre-match decimal odds from a fixture dict.
+    Returns a mapping like {"Over 2.5": 1.72, "BTTS Yes": 1.85, ...}.
+    Fields come from the FootyStats API (odds_ft_1, odds_over25, etc.).
+    """
+    def _f(key: str) -> float:
+        try:
+            v = float(fixture.get(key, 0))
+            return v if v > 0 else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    odds: dict[str, float] = {}
+
+    # 1X2
+    if _f("odds_ft_1"):
+        odds["Home Win"] = _f("odds_ft_1")
+    if _f("odds_ft_x"):
+        odds["Draw"] = _f("odds_ft_x")
+    if _f("odds_ft_2"):
+        odds["Away Win"] = _f("odds_ft_2")
+
+    # Over / Under goals
+    for thresh in ("05", "15", "25", "35", "45"):
+        label = f"{thresh[0]}.{thresh[1]}"
+        if _f(f"odds_ft_over{thresh}") or _f(f"odds_over{thresh}"):
+            odds[f"Over {label}"] = _f(f"odds_ft_over{thresh}") or _f(f"odds_over{thresh}")
+        if _f(f"odds_ft_under{thresh}") or _f(f"odds_under{thresh}"):
+            odds[f"Under {label}"] = _f(f"odds_ft_under{thresh}") or _f(f"odds_under{thresh}")
+
+    # BTTS
+    if _f("odds_btts_yes"):
+        odds["BTTS Yes"] = _f("odds_btts_yes")
+    if _f("odds_btts_no"):
+        odds["BTTS No"] = _f("odds_btts_no")
+
+    # Double chance
+    if _f("odds_doublechance_1x"):
+        odds["Home or Draw"] = _f("odds_doublechance_1x")
+    if _f("odds_doublechance_x2"):
+        odds["Away or Draw"] = _f("odds_doublechance_x2")
+    if _f("odds_doublechance_12"):
+        odds["Home or Away"] = _f("odds_doublechance_12")
+
+    return odds
+
+
+# Map pick market names → odds-dict keys
+_MARKET_ODDS_MAP: dict[str, str] = {
+    "Match Goals Over 0.5": "Over 0.5",
+    "Match Goals Over 1.5": "Over 1.5",
+    "Match Goals Over 2.5": "Over 2.5",
+    "Match Goals Over 3.5": "Over 3.5",
+    "BTTS": "BTTS Yes",
+    "Home Win": "Home Win",
+    "Draw": "Draw",
+    "Away Win": "Away Win",
+}
+
+
+def attach_odds(picks: list[dict], odds: dict[str, float]) -> list[dict]:
+    """
+    Attach odds to each pick (where available) and filter out
+    picks whose odds fall below MIN_ODDS.
+    """
+    enriched = []
+    for p in picks:
+        market = p.get("market", "")
+        odds_val = 0.0
+
+        # Direct lookup via mapping table
+        if market in _MARKET_ODDS_MAP:
+            odds_val = odds.get(_MARKET_ODDS_MAP[market], 0.0)
+        else:
+            # Fuzzy: try to find odds key contained in market name
+            for odds_key, odds_v in odds.items():
+                if odds_key.lower() in market.lower():
+                    odds_val = odds_v
+                    break
+
+        p["odds"] = odds_val
+
+        # Filter: keep picks with no known odds (player markets, etc.)
+        # but drop picks that DO have odds and are below the threshold
+        if odds_val > 0 and odds_val < MIN_ODDS:
+            continue
+        enriched.append(p)
+    return enriched
+
+
+# ---------------------------------------------------------------------------
 # Reusable analysis entry point (for web app / programmatic use)
 # ---------------------------------------------------------------------------
 
@@ -1951,6 +2053,10 @@ def run_analysis(fixture: dict) -> dict:
                 + compute_player_picks(away_players, away_name)
             )
             picks.extend(player_picks)
+
+        # Attach bookmaker odds and filter out low-value picks (< MIN_ODDS)
+        fixture_odds = extract_odds(fixture)
+        picks = attach_odds(picks, fixture_odds)
 
         html = generate_html_report(
             fixture, home_last10, away_last10,
@@ -2129,6 +2235,12 @@ def main():
             print(f"  [DEBUG] {len(player_picks)} player picks generated")
     else:
         print("  Skipping player stats (no season_id)")
+
+    # Step 4c: Attach odds & filter low-value picks
+    fixture_odds = extract_odds(match_info)
+    if fixture_odds:
+        print(f"  Found odds for {len(fixture_odds)} markets")
+    picks = attach_odds(picks, fixture_odds)
 
     # Step 5: Output
     report_args = (

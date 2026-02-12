@@ -26,6 +26,7 @@ load_dotenv()
 BASE_URL = "https://api.football-data-api.com"
 API_KEY = os.getenv("FOOTYSTATS_API_KEY", "")
 api_credits_used = 0
+DEBUG = False
 
 
 # ---------------------------------------------------------------------------
@@ -38,6 +39,9 @@ def api_get(endpoint: str, params: dict | None = None) -> dict | list:
     params = params or {}
     params["key"] = API_KEY
     url = f"{BASE_URL}/{endpoint.lstrip('/')}"
+    if DEBUG:
+        display_params = {k: v for k, v in params.items() if k != "key"}
+        print(f"  [DEBUG] GET {url} params={display_params}")
     try:
         resp = requests.get(url, params=params, timeout=30)
     except requests.exceptions.ProxyError:
@@ -55,6 +59,10 @@ def api_get(endpoint: str, params: dict | None = None) -> dict | list:
         sys.exit(1)
     resp.raise_for_status()
     data = resp.json()
+    if DEBUG:
+        import json
+        preview = json.dumps(data, indent=2)[:2000]
+        print(f"  [DEBUG] Response ({resp.status_code}):\n{preview}")
     # The API wraps some responses in {"success": true, "data": [...]}
     if isinstance(data, dict) and "data" in data:
         return data["data"]
@@ -838,8 +846,12 @@ def main():
     parser.add_argument("--list", action="store_true", help="List today's fixtures")
     parser.add_argument("--date", type=str, default=None, help="Date in YYYY-MM-DD format (default: today)")
     parser.add_argument("--timezone", type=str, default="Etc/UTC", help="Timezone (default: Etc/UTC)")
+    parser.add_argument("--debug", action="store_true", help="Show raw API responses")
 
     args = parser.parse_args()
+
+    global DEBUG
+    DEBUG = args.debug
 
     if not API_KEY:
         print("Error: FOOTYSTATS_API_KEY not set. Add it to .env or set the environment variable.")
@@ -881,6 +893,10 @@ def main():
     print(f"\n  Found: {home_name} vs {away_name}")
     print(f"  League: {league}")
     print(f"  Kick-off: {ko_str}")
+    if DEBUG:
+        import json
+        print(f"  [DEBUG] Match object keys: {list(match_info.keys())}")
+        print(f"  [DEBUG] Match object:\n{json.dumps(match_info, indent=2, default=str)[:3000]}")
     print(f"\n  Pulling data...")
 
     home_id = int(match_info.get("homeID", match_info.get("home_id", 0)))

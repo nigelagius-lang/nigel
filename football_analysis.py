@@ -10,6 +10,8 @@ Usage:
     python football_analysis.py --list              # list today's fixtures
 """
 
+from __future__ import annotations
+
 import argparse
 import os
 import sys

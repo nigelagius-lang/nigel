@@ -144,6 +144,19 @@ def get_team_players(season_id: int, team_id: int) -> list[dict]:
     Extracts fouls, shots, and shots on target into a normalised dict.
     """
     all_players = fetch_league_players(season_id)
+    if DEBUG and all_players:
+        import json
+        print(f"  [DEBUG] league-players returned {len(all_players)} players")
+        print(f"  [DEBUG] First player keys: {sorted(all_players[0].keys())}")
+        print(f"  [DEBUG] First player sample:\n{json.dumps(all_players[0], indent=2, default=str)[:3000]}")
+        # Show all team IDs found
+        team_ids_found = set()
+        for p in all_players:
+            for k in ("club_team_id", "team_id", "teamId", "currentTeamId"):
+                if p.get(k) is not None:
+                    team_ids_found.add((k, p.get(k)))
+        print(f"  [DEBUG] Looking for team_id={team_id}")
+        print(f"  [DEBUG] Sample team ID fields found: {list(team_ids_found)[:10]}")
     team_players = []
     for p in all_players:
         pid_team = p.get("club_team_id") or p.get("team_id") or p.get("teamId")

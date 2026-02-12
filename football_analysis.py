@@ -119,14 +119,25 @@ def fetch_league_matches(season_id: int) -> list[dict]:
 _league_players_cache: dict[int, list[dict]] = {}
 
 def fetch_league_players(season_id: int) -> list[dict]:
-    """Fetch all players for a league season. Results are cached per season_id."""
+    """Fetch ALL players for a league season, paginating through all pages."""
     if season_id in _league_players_cache:
         return _league_players_cache[season_id]
-    data = api_get("league-players", {"season_id": season_id, "max_per_page": 1000})
-    if not isinstance(data, list):
-        data = []
-    _league_players_cache[season_id] = data
-    return data
+    all_players: list[dict] = []
+    page = 1
+    while page <= 10:  # safety cap
+        batch = api_get("league-players", {"season_id": season_id, "page": page})
+        if not isinstance(batch, list) or not batch:
+            break
+        all_players.extend(batch)
+        if len(batch) < 200:  # last page
+            break
+        page += 1
+    if DEBUG:
+        # Show which club_team_ids we got
+        cids = set(p.get("club_team_id") for p in all_players if p.get("club_team_id"))
+        print(f"  [DEBUG] league-players: {len(all_players)} players across {page} page(s), {len(cids)} teams")
+    _league_players_cache[season_id] = all_players
+    return all_players
 
 
 _league_teams_cache: dict[int, list[dict]] = {}

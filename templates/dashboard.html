@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Football Analysis Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0f1923;
+    color: #e0e6ed;
+    min-height: 100vh;
+  }
+  .header {
+    background: linear-gradient(135deg, #1a2a3a 0%, #0f1923 100%);
+    border-bottom: 1px solid #1e3a50;
+    padding: 24px 32px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .header h1 { font-size: 1.4rem; color: #fff; }
+  .header-meta {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    font-size: 0.85rem;
+    color: #8899aa;
+  }
+  .badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .badge-live { background: #22c55e22; color: #22c55e; border: 1px solid #22c55e44; }
+  .badge-count { background: #3b82f622; color: #5ba3d9; border: 1px solid #3b82f644; }
+  .refresh-btn {
+    background: #1e3a50;
+    color: #5ba3d9;
+    border: 1px solid #2a4a60;
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: background 0.2s;
+  }
+  .refresh-btn:hover { background: #2a4a60; }
+  .refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px 16px; }
+
+  .match-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 16px;
+  }
+
+  .match-card {
+    background: #162230;
+    border: 1px solid #1e3a50;
+    border-radius: 10px;
+    padding: 20px;
+    transition: border-color 0.2s, transform 0.15s;
+    cursor: pointer;
+    text-decoration: none;
+    color: inherit;
+    display: block;
+  }
+  .match-card:hover {
+    border-color: #5ba3d9;
+    transform: translateY(-2px);
+  }
+  .match-card.error { border-left: 3px solid #ef4444; }
+
+  .match-teams {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+  }
+  .team-name {
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: #fff;
+    max-width: 42%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .vs { color: #556677; font-size: 0.85rem; padding: 0 8px; }
+
+  .match-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.8rem;
+    color: #8899aa;
+    margin-bottom: 12px;
+  }
+
+  .picks-summary {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .pick-chip {
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .pick-hot { background: #22c55e22; color: #22c55e; }
+  .pick-warm { background: #eab30822; color: #eab308; }
+  .pick-none { background: #55667722; color: #556677; }
+
+  .error-msg { color: #ef4444; font-size: 0.85rem; margin-top: 8px; }
+
+  .empty-state {
+    text-align: center;
+    padding: 80px 20px;
+    color: #556677;
+  }
+  .empty-state h2 { font-size: 1.2rem; margin-bottom: 8px; color: #8899aa; }
+
+  @media (max-width: 600px) {
+    .header { padding: 16px; }
+    .match-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>Football Analysis</h1>
+  </div>
+  <div class="header-meta">
+    <span class="badge badge-count">{{ match_count }} match{{ 'es' if match_count != 1 }}</span>
+    {% if last_refresh %}
+      <span>Updated {{ last_refresh.strftime('%H:%M UTC') }}</span>
+    {% endif %}
+    {% if refreshing %}
+      <span class="badge badge-live">Refreshing...</span>
+    {% endif %}
+    <form action="/refresh" method="post" style="display:inline">
+      <button class="refresh-btn" type="submit" {% if refreshing %}disabled{% endif %}>
+        Refresh
+      </button>
+    </form>
+  </div>
+</div>
+
+<div class="container">
+  {% if reports %}
+    <div class="match-grid">
+      {% for r in reports %}
+        {% if r.error %}
+          <div class="match-card error">
+        {% else %}
+          <a href="/report/{{ r.slug }}" class="match-card" target="_blank">
+        {% endif %}
+            <div class="match-teams">
+              <span class="team-name">{{ r.home_name }}</span>
+              <span class="vs">vs</span>
+              <span class="team-name">{{ r.away_name }}</span>
+            </div>
+            <div class="match-meta">
+              <span>{{ r.league }}</span>
+              <span>{{ r.kick_off }}</span>
+            </div>
+            {% if r.error %}
+              <div class="error-msg">{{ r.error }}</div>
+            {% else %}
+              <div class="picks-summary">
+                {% set ns = namespace(hot=0, warm=0) %}
+                {% for p in r.picks %}
+                  {% set pct = (p.hits / [p.total, 1]|max) * 100 %}
+                  {% if pct >= 90 %}{% set ns.hot = ns.hot + 1 %}{% endif %}
+                  {% if pct >= 80 and pct < 90 %}{% set ns.warm = ns.warm + 1 %}{% endif %}
+                {% endfor %}
+                {% if ns.hot > 0 %}
+                  <span class="pick-chip pick-hot">{{ ns.hot }} high confidence</span>
+                {% endif %}
+                {% if ns.warm > 0 %}
+                  <span class="pick-chip pick-warm">{{ ns.warm }} likely</span>
+                {% endif %}
+                {% if ns.hot == 0 and ns.warm == 0 %}
+                  <span class="pick-chip pick-none">No strong picks</span>
+                {% endif %}
+              </div>
+            {% endif %}
+        {% if r.error %}
+          </div>
+        {% else %}
+          </a>
+        {% endif %}
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="empty-state">
+      <h2>No matches loaded yet</h2>
+      <p>{% if refreshing %}Fetching today's fixtures...{% else %}Click Refresh to load today's fixtures.{% endif %}</p>
+    </div>
+  {% endif %}
+</div>
+
+{% if refreshing %}
+<script>
+  // Auto-reload while refreshing
+  setTimeout(() => location.reload(), 15000);
+</script>
+{% endif %}
+
+</body>
+</html>

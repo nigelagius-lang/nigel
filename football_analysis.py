@@ -1132,8 +1132,9 @@ def generate_html_report(
     away_avgs: dict,
     home_players: list[dict] | None = None,
     away_players: list[dict] | None = None,
+    write_file: bool = True,
 ) -> str:
-    """Generate a styled HTML report and return the file path."""
+    """Generate a styled HTML report. Returns file path (write_file=True) or HTML string."""
     import html as html_mod
     import tempfile
     import webbrowser
@@ -1469,6 +1470,9 @@ def generate_html_report(
 </body>
 </html>"""
 
+    if not write_file:
+        return page
+
     # Write to a temp file and open in browser
     report_dir = os.path.dirname(os.path.abspath(__file__))
     safe_home = home_name.replace(" ", "_").lower()
@@ -1512,6 +1516,121 @@ def list_fixtures(date_str: str | None = None):
         print(f"  {i:3d}. {home:25s} vs {away:25s} | {league:30s} | {ko}{score}")
 
     print(f"\n  API credits used: {api_credits_used}\n")
+
+
+# ---------------------------------------------------------------------------
+# Reusable analysis entry point (for web app / programmatic use)
+# ---------------------------------------------------------------------------
+
+def run_analysis(fixture: dict) -> dict:
+    """
+    Run full analysis on a single fixture dict (from fetch_todays_matches).
+    Returns a dict with:
+      - html: full HTML report string
+      - home_name, away_name, league, kick_off, kick_off_unix
+      - picks: list of picks
+      - home_avgs, away_avgs
+      - api_credits: credits used for this analysis
+      - error: str or None
+    """
+    global api_credits_used
+    credits_before = api_credits_used
+
+    home_name = fixture.get("home_name", "Home")
+    away_name = fixture.get("away_name", "Away")
+    league = fixture.get("league_name", fixture.get("competition_name", "Unknown"))
+    ko_unix = fixture.get("date_unix", 0)
+    ko_str = (
+        datetime.fromtimestamp(int(ko_unix), tz=timezone.utc).strftime("%H:%M UTC")
+        if ko_unix else "TBD"
+    )
+
+    result = {
+        "home_name": home_name,
+        "away_name": away_name,
+        "league": league,
+        "kick_off": ko_str,
+        "kick_off_unix": int(ko_unix) if ko_unix else 0,
+        "html": "",
+        "picks": [],
+        "home_avgs": {},
+        "away_avgs": {},
+        "api_credits": 0,
+        "error": None,
+    }
+
+    try:
+        home_id = int(fixture.get("homeID", fixture.get("home_id", 0)))
+        away_id = int(fixture.get("awayID", fixture.get("away_id", 0)))
+
+        season_id = None
+        for key in ("competition_id", "season_id", "league_id", "season"):
+            val = fixture.get(key)
+            if val is not None:
+                try:
+                    season_id = int(val)
+                    if season_id > 0:
+                        break
+                except (ValueError, TypeError):
+                    continue
+
+        home_last10 = get_team_last10(home_id, season_id)
+        away_last10 = get_team_last10(away_id, season_id)
+
+        if not home_last10 and not away_last10:
+            result["error"] = "No match history available"
+            return result
+
+        pos_map = {}
+        total_teams = 20
+        if season_id:
+            pos_map = build_position_map(season_id)
+            if pos_map:
+                total_teams = max(pos_map.values())
+
+        home_ctx = contextual_split(home_last10, pos_map, total_teams)
+        away_ctx = contextual_split(away_last10, pos_map, total_teams)
+        home_avgs = compute_team_averages(home_last10)
+        away_avgs = compute_team_averages(away_last10)
+        picks, missing_markets = compute_hit_rates(home_last10, away_last10)
+
+        home_players = []
+        away_players = []
+        if season_id and season_id > 0:
+            home_club_id = resolve_club_team_id(season_id, home_name)
+            away_club_id = resolve_club_team_id(season_id, away_name)
+            if home_club_id and away_club_id:
+                try:
+                    home_players = get_team_players(season_id, home_club_id, competition_id=season_id)
+                    away_players = get_team_players(season_id, away_club_id, competition_id=season_id)
+                except Exception:
+                    pass
+            player_picks = (
+                compute_player_picks(home_players, home_name)
+                + compute_player_picks(away_players, away_name)
+            )
+            picks.extend(player_picks)
+
+        html = generate_html_report(
+            fixture, home_last10, away_last10,
+            home_ctx, away_ctx,
+            picks, missing_markets,
+            home_avgs, away_avgs,
+            home_players=home_players,
+            away_players=away_players,
+            write_file=False,
+        )
+
+        result["html"] = html
+        result["picks"] = picks
+        result["home_avgs"] = home_avgs
+        result["away_avgs"] = away_avgs
+
+    except Exception as e:
+        result["error"] = str(e)
+
+    result["api_credits"] = api_credits_used - credits_before
+    return result
 
 
 # ---------------------------------------------------------------------------

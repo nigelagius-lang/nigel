@@ -327,6 +327,21 @@
   .over25-btn:hover { opacity: 0.9; transform: translateY(-1px); }
   .over25-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
+  .over10c-btn {
+    background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+    color: #fff;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 700;
+    transition: opacity 0.2s, transform 0.1s;
+    white-space: nowrap;
+  }
+  .over10c-btn:hover { opacity: 0.9; transform: translateY(-1px); }
+  .over10c-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
   /* Modal overlay */
   .modal-overlay {
     display: none;
@@ -440,6 +455,30 @@
     color: #556677;
   }
 
+  /* Over 10 Corners result cards */
+  .o10c-card {
+    background: #1a2a3a;
+    border: 1px solid #1e3a50;
+    border-left: 3px solid #8b5cf6;
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin-bottom: 12px;
+  }
+  .o10c-card:last-child { margin-bottom: 0; }
+  .o10c-rank {
+    display: inline-block;
+    background: #8b5cf6;
+    color: #fff;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 24px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    margin-right: 10px;
+  }
+
   @media (max-width: 600px) {
     .header { padding: 16px; }
     .match-grid { grid-template-columns: 1fr; }
@@ -472,6 +511,9 @@
     <button class="over25-btn" id="over25Btn" onclick="triggerOver25()">
       Today's Top Over 2.5 Goals Picks
     </button>
+    <button class="over10c-btn" id="over10cBtn" onclick="triggerOver10Corners()">
+      Today's Top Over 10 Corners Picks
+    </button>
     {% endif %}
   </div>
 </div>
@@ -484,6 +526,18 @@
       <button class="modal-close" onclick="closeOver25Modal()">&times;</button>
     </div>
     <div class="modal-body" id="over25Body">
+    </div>
+  </div>
+</div>
+
+<!-- Over 10 Corners Modal -->
+<div class="modal-overlay" id="over10cModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 style="color:#8b5cf6">Top Over 10 Corners Picks</h2>
+      <button class="modal-close" onclick="closeOver10cModal()">&times;</button>
+    </div>
+    <div class="modal-body" id="over10cBody">
     </div>
   </div>
 </div>
@@ -768,6 +822,81 @@ function closeOver25Modal() {
 // Close modal on overlay click
 document.getElementById('over25Modal').addEventListener('click', function(e) {
   if (e.target === this) closeOver25Modal();
+});
+
+// Over 10 Corners feature
+function triggerOver10Corners() {
+  var btn = document.getElementById('over10cBtn');
+  btn.disabled = true;
+
+  var modal = document.getElementById('over10cModal');
+  var body = document.getElementById('over10cBody');
+  modal.classList.add('active');
+  body.innerHTML = '<div class="modal-loading"><div class="spinner"></div><p>Analyzing all fixtures for Over 10 Corners...</p><p style="font-size:0.75rem;color:#556677;margin-top:8px;">This may take a minute</p></div>';
+
+  fetch('/api/over10corners', { method: 'POST' })
+    .then(function() { pollOver10Corners(); })
+    .catch(function() {
+      body.innerHTML = '<div class="o25-empty">Request failed. Please try again.</div>';
+      btn.disabled = false;
+    });
+}
+
+function pollOver10Corners() {
+  var poll = setInterval(function() {
+    fetch('/api/over10corners-status')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.status === 'done') {
+          clearInterval(poll);
+          document.getElementById('over10cBtn').disabled = false;
+          renderOver10Corners(data.results, data.error);
+          var badge = document.querySelector('.badge-credits');
+          if (badge) badge.textContent = data.api_credits_used + ' API credits';
+        }
+      });
+  }, 2000);
+}
+
+function renderOver10Corners(results, error) {
+  var body = document.getElementById('over10cBody');
+  if (error) {
+    body.innerHTML = '<div class="o25-empty">Error: ' + error + '</div>';
+    return;
+  }
+  if (!results || results.length === 0) {
+    body.innerHTML = '<div class="o25-empty">No fixtures with enough corner data to analyze.</div>';
+    return;
+  }
+
+  var html = '';
+  for (var i = 0; i < results.length; i++) {
+    var r = results[i];
+    var probColor = r.probability >= 70 ? '#22c55e' : (r.probability >= 50 ? '#eab308' : '#8899aa');
+    html += '<div class="o10c-card">' +
+      '<div style="margin-bottom:8px;">' +
+        '<span class="o10c-rank">' + (i + 1) + '</span>' +
+        '<span class="o25-teams">' + r.home_name + ' vs ' + r.away_name + '</span>' +
+      '</div>' +
+      '<div class="o25-meta">' + r.league + ' &middot; ' + r.kick_off + '</div>' +
+      '<div class="o25-prob" style="color:' + probColor + '">' + r.probability + '% Over 10 Corners</div>' +
+      '<div class="o25-stats">' +
+        '<div>' + r.home_name + ' O10: <span>' + r.home_over10_pct + '%</span> (' + r.home_matches + ' games)</div>' +
+        '<div>' + r.away_name + ' O10: <span>' + r.away_over10_pct + '%</span> (' + r.away_matches + ' games)</div>' +
+        '<div>Avg total corners: <span>' + r.home_avg_total_corners + '</span> / <span>' + r.away_avg_total_corners + '</span></div>' +
+        '<div>Combined avg: <span>' + r.combined_avg_corners + '</span> corners</div>' +
+      '</div>' +
+    '</div>';
+  }
+  body.innerHTML = html;
+}
+
+function closeOver10cModal() {
+  document.getElementById('over10cModal').classList.remove('active');
+}
+
+document.getElementById('over10cModal').addEventListener('click', function(e) {
+  if (e.target === this) closeOver10cModal();
 });
 
 {% if refreshing %}

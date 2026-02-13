@@ -172,6 +172,9 @@ _state = {
     "over25_status": "idle",  # idle | running | done
     "over25_results": [],     # list of top picks
     "over25_error": None,
+    "over10c_status": "idle",  # idle | running | done
+    "over10c_results": [],     # list of top corner picks
+    "over10c_error": None,
 }
 
 
@@ -563,6 +566,176 @@ def over25_status():
             "status": _state["over25_status"],
             "results": _state["over25_results"],
             "error": _state["over25_error"],
+            "api_credits_used": fa.api_credits_used,
+        })
+
+
+# ---------------------------------------------------------------------------
+# Over 10 Corners analysis
+# ---------------------------------------------------------------------------
+
+def _run_over10corners():
+    """Analyze all fixtures for Over 10 Corners probability."""
+    with _lock:
+        if _state["over10c_status"] == "running":
+            return
+        _state["over10c_status"] = "running"
+        _state["over10c_error"] = None
+        fixtures = list(_state["fixtures"])
+
+    try:
+        results = []
+        for fix in fixtures:
+            home_name = fix.get("home_name", "Home")
+            away_name = fix.get("away_name", "Away")
+            home_id = int(fix.get("homeID", fix.get("home_id", 0)))
+            away_id = int(fix.get("awayID", fix.get("away_id", 0)))
+            league = fix.get("league_name", fix.get("competition_name", "Unknown"))
+            ko_unix = fix.get("date_unix", 0)
+            ko_str = (
+                datetime.fromtimestamp(int(ko_unix), tz=timezone.utc).strftime("%H:%M UTC")
+                if ko_unix else "TBD"
+            )
+
+            if not home_id or not away_id:
+                continue
+
+            # Get season_id for league-matches lookup
+            season_id = None
+            for key in ("competition_id", "season_id", "league_id", "season"):
+                val = fix.get(key)
+                if val is not None:
+                    try:
+                        season_id = int(val)
+                        if season_id > 0:
+                            break
+                    except (ValueError, TypeError):
+                        continue
+
+            # Fetch last 10 matches for each team
+            home_last10 = fa.get_team_last10(home_id, season_id)
+            away_last10 = fa.get_team_last10(away_id, season_id)
+
+            if not home_last10 and not away_last10:
+                continue
+
+            # Calculate Over 10 Corners stats for home team
+            home_over10 = 0
+            home_corner_totals = []
+            home_corners_for = []
+            home_corners_against = []
+            for m in home_last10:
+                mc = m.get("match_corners", -1)
+                cf = m.get("corners", -1)
+                ca = m.get("corners_against", -1)
+                if mc >= 0:
+                    home_corner_totals.append(mc)
+                    if mc > 10:
+                        home_over10 += 1
+                if cf >= 0:
+                    home_corners_for.append(cf)
+                if ca >= 0:
+                    home_corners_against.append(ca)
+
+            home_matches = len(home_corner_totals)
+            home_pct = (home_over10 / home_matches * 100) if home_matches > 0 else 0
+            home_avg_total = sum(home_corner_totals) / home_matches if home_matches > 0 else 0
+            home_avg_for = sum(home_corners_for) / len(home_corners_for) if home_corners_for else 0
+            home_avg_against = sum(home_corners_against) / len(home_corners_against) if home_corners_against else 0
+
+            # Calculate Over 10 Corners stats for away team
+            away_over10 = 0
+            away_corner_totals = []
+            away_corners_for = []
+            away_corners_against = []
+            for m in away_last10:
+                mc = m.get("match_corners", -1)
+                cf = m.get("corners", -1)
+                ca = m.get("corners_against", -1)
+                if mc >= 0:
+                    away_corner_totals.append(mc)
+                    if mc > 10:
+                        away_over10 += 1
+                if cf >= 0:
+                    away_corners_for.append(cf)
+                if ca >= 0:
+                    away_corners_against.append(ca)
+
+            away_matches = len(away_corner_totals)
+            away_pct = (away_over10 / away_matches * 100) if away_matches > 0 else 0
+            away_avg_total = sum(away_corner_totals) / away_matches if away_matches > 0 else 0
+            away_avg_for = sum(away_corners_for) / len(away_corners_for) if away_corners_for else 0
+            away_avg_against = sum(away_corners_against) / len(away_corners_against) if away_corners_against else 0
+
+            # Combined probability
+            if home_matches > 0 and away_matches > 0:
+                combined_pct = (home_pct + away_pct) / 2
+                combined_avg = (home_avg_total + away_avg_total) / 2
+            elif home_matches > 0:
+                combined_pct = home_pct
+                combined_avg = home_avg_total
+            elif away_matches > 0:
+                combined_pct = away_pct
+                combined_avg = away_avg_total
+            else:
+                continue
+
+            results.append({
+                "home_name": home_name,
+                "away_name": away_name,
+                "league": league,
+                "kick_off": ko_str,
+                "kick_off_unix": int(ko_unix) if ko_unix else 0,
+                "probability": round(combined_pct, 1),
+                "home_over10_pct": round(home_pct, 1),
+                "away_over10_pct": round(away_pct, 1),
+                "home_avg_total_corners": round(home_avg_total, 1),
+                "away_avg_total_corners": round(away_avg_total, 1),
+                "combined_avg_corners": round(combined_avg, 1),
+                "home_avg_for": round(home_avg_for, 1),
+                "home_avg_against": round(home_avg_against, 1),
+                "away_avg_for": round(away_avg_for, 1),
+                "away_avg_against": round(away_avg_against, 1),
+                "home_matches": home_matches,
+                "away_matches": away_matches,
+            })
+
+        # Sort by probability descending, take top 4
+        results.sort(key=lambda r: r["probability"], reverse=True)
+        top4 = results[:4]
+
+        with _lock:
+            _state["over10c_results"] = top4
+            _state["over10c_status"] = "done"
+
+    except Exception as e:
+        with _lock:
+            _state["over10c_status"] = "done"
+            _state["over10c_error"] = str(e)
+
+
+@app.route("/api/over10corners", methods=["POST"])
+def trigger_over10corners():
+    """Trigger Over 10 Corners analysis for all fixtures."""
+    with _lock:
+        if _state["over10c_status"] == "running":
+            return jsonify({"status": "running"}), 202
+        if not _state["fixtures"]:
+            return jsonify({"error": "No fixtures loaded. Refresh first."}), 400
+
+    t = threading.Thread(target=_run_over10corners, daemon=True)
+    t.start()
+    return jsonify({"status": "running"}), 202
+
+
+@app.route("/api/over10corners-status")
+def over10corners_status():
+    """Poll Over 10 Corners analysis status and results."""
+    with _lock:
+        return jsonify({
+            "status": _state["over10c_status"],
+            "results": _state["over10c_results"],
+            "error": _state["over10c_error"],
             "api_credits_used": fa.api_credits_used,
         })
 

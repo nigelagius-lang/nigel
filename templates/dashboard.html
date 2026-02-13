@@ -589,12 +589,27 @@
     margin-top: 8px;
   }
   .o35c-detail-grid span { color: #e0e6ed; font-weight: 600; }
-  .o35c-ref-row {
+  .o35c-score-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 6px 0 4px;
     font-size: 0.8rem;
     color: #8899aa;
-    margin: 6px 0 4px;
   }
-  .o35c-ref-row span { color: #e0e6ed; font-weight: 600; }
+  .o35c-score-bar .score-val {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #e0e6ed;
+  }
+  .o35c-score-pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    margin-left: 4px;
+  }
   .derby-tag {
     display: inline-block;
     background: #dc262622;
@@ -694,7 +709,7 @@
 <div class="modal-overlay" id="over35cModal">
   <div class="modal" style="max-width:720px">
     <div class="modal-header">
-      <h2 style="color:#dc2626">High Probability Over 3.5 Cards &ndash; Next 48 Hours</h2>
+      <h2 style="color:#dc2626">Over 3.5 Cards &ndash; Aggression Model &ndash; Top 5</h2>
       <button class="modal-close" onclick="closeOver35cModal()">&times;</button>
     </div>
     <div class="modal-body" id="over35cBody">
@@ -1134,7 +1149,7 @@ document.getElementById('over15fhModal').addEventListener('click', function(e) {
   if (e.target === this) closeOver15fhModal();
 });
 
-// Over 3.5 Cards feature
+// Over 3.5 Cards feature (Aggression Model)
 function triggerOver35Cards() {
   var btn = document.getElementById('over35cBtn');
   btn.disabled = true;
@@ -1143,8 +1158,8 @@ function triggerOver35Cards() {
   var body = document.getElementById('over35cBody');
   modal.classList.add('active');
   body.innerHTML = '<div class="modal-loading"><div class="spinner"></div>' +
-    '<p>Running probabilistic card model across all fixtures...</p>' +
-    '<p style="font-size:0.75rem;color:#556677;margin-top:8px;">Poisson / Negative Binomial analysis with referee &amp; aggression weighting</p></div>';
+    '<p>Analysing team aggression profiles across all fixtures...</p>' +
+    '<p style="font-size:0.75rem;color:#556677;margin-top:8px;">Cards, fouls, league position, H2H &amp; derby weighting</p></div>';
 
   fetch('/api/over35cards', { method: 'POST' })
     .then(function() { pollOver35Cards(); })
@@ -1177,29 +1192,19 @@ function renderOver35Cards(results, error) {
     return;
   }
   if (!results || results.length === 0) {
-    body.innerHTML = '<div class="o25-empty">No matches above 60% threshold for Over 3.5 Cards.</div>';
+    body.innerHTML = '<div class="o25-empty">No qualifying matches found. Requires both teams\u2019 last 10 data and min 2 H2H matches.</div>';
     return;
   }
 
   var html = '';
   for (var i = 0; i < results.length; i++) {
     var r = results[i];
-    var probColor = r.probability >= 82 ? '#22c55e' : (r.probability >= 70 ? '#eab308' : '#5ba3d9');
-    var tierMap = {'Elite':'tier-elite','Strong':'tier-strong','Moderate':'tier-moderate','Low Data':'tier-lowdata'};
+    var scoreColor = r.combined_score >= 70 ? '#22c55e' : (r.combined_score >= 55 ? '#eab308' : '#5ba3d9');
+    var tierMap = {'Elite':'tier-elite','Strong':'tier-strong','Moderate':'tier-moderate'};
     var tierClass = tierMap[r.confidence_tier] || 'tier-moderate';
-    var refDisplay = r.referee_name && r.referee_name !== 'Not Available' ? r.referee_name : '<span style="color:#ef4444">Not Available</span>';
-    var refAvgDisplay = r.referee_avg_cards !== null
-      ? r.referee_avg_cards + ' cards/game' + (r.referee_matches ? ' (' + r.referee_matches + ' matches)' : '')
-      : '<span style="color:#556677">N/A</span>';
     var derbyTag = r.derby ? '<span class="derby-tag">Derby</span>' : '';
-
-    // Data quality warning
-    var dataWarning = '';
-    if (r.data_quality === 'partial') {
-      dataWarning = '<div class="data-warning">Partial data: one team has &lt; 3 matches — league averages used as fallback</div>';
-    } else if (r.data_quality === 'low') {
-      dataWarning = '<div class="data-warning">Low data: both teams have &lt; 3 matches — league averages used</div>';
-    }
+    var homePosDisplay = r.home_position ? '#' + r.home_position : '?';
+    var awayPosDisplay = r.away_position ? '#' + r.away_position : '?';
 
     html += '<div class="o35c-card">' +
       '<div style="margin-bottom:6px;">' +
@@ -1208,21 +1213,41 @@ function renderOver35Cards(results, error) {
         derbyTag +
       '</div>' +
       '<div class="o25-meta">' + r.league + ' &middot; ' + r.kick_off + '</div>' +
-      '<div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;">' +
-        '<div class="o25-prob" style="color:' + probColor + ';margin-bottom:0">' + r.probability + '%</div>' +
+
+      // Combined aggression score
+      '<div class="o35c-score-bar">' +
+        'Combined Aggression: <span class="score-val" style="color:' + scoreColor + '">' + r.combined_score + '</span>' +
+        '<span style="color:#556677;font-size:0.7rem">/ 100</span>' +
         '<span class="tier-badge ' + tierClass + '">' + r.confidence_tier + '</span>' +
       '</div>' +
-      '<div class="o35c-ref-row">Referee: <span>' + refDisplay + '</span> &middot; Avg: <span>' + refAvgDisplay + '</span></div>' +
+
+      // Per-team aggression scores
       '<div class="o35c-detail-grid">' +
-        '<div>Aggression Score: <span>' + r.combined_aggression + '</span></div>' +
-        '<div>Projected Cards (λ): <span>' + r.projected_cards + '</span></div>' +
-        '<div>' + r.home_name + ' cards/game: <span>' + r.home_avg_match_cards + '</span> <span style="color:#556677;font-size:0.7rem">(' + r.home_data_games + ' games)</span></div>' +
-        '<div>' + r.away_name + ' cards/game: <span>' + r.away_avg_match_cards + '</span> <span style="color:#556677;font-size:0.7rem">(' + r.away_data_games + ' games)</span></div>' +
-        '<div>' + r.home_name + ' fouls/game: <span>' + r.home_fouls_avg + '</span></div>' +
-        '<div>' + r.away_name + ' fouls/game: <span>' + r.away_fouls_avg + '</span></div>' +
-        '<div style="color:#556677;font-size:0.7rem">Model: ' + r.model_type + '</div>' +
+        '<div>' + r.home_name + ' Aggression: <span style="color:' + scoreColor + '">' + r.home_aggression + '</span></div>' +
+        '<div>' + r.away_name + ' Aggression: <span style="color:' + scoreColor + '">' + r.away_aggression + '</span></div>' +
+        '<div>Cards/game: <span>' + r.home_avg_cards_pg + '</span> <span style="color:#556677;font-size:0.7rem">(' + r.home_data_games + ' games)</span></div>' +
+        '<div>Cards/game: <span>' + r.away_avg_cards_pg + '</span> <span style="color:#556677;font-size:0.7rem">(' + r.away_data_games + ' games)</span></div>' +
+        '<div>Fouls/game: <span>' + r.home_avg_fouls_pg + '</span></div>' +
+        '<div>Fouls/game: <span>' + r.away_avg_fouls_pg + '</span></div>' +
+        '<div>League Pos: <span>' + homePosDisplay + '</span></div>' +
+        '<div>League Pos: <span>' + awayPosDisplay + '</span></div>' +
       '</div>' +
-      dataWarning +
+
+      // H2H row
+      '<div style="font-size:0.78rem;color:#8899aa;margin-top:6px;">' +
+        'H2H: <span style="color:#e0e6ed;font-weight:600">' + r.h2h_matches + ' matches</span>' +
+        (r.h2h_avg_cards !== null ? ' &middot; Avg cards: <span style="color:#e0e6ed;font-weight:600">' + r.h2h_avg_cards + '</span>' : '') +
+        ' &middot; League avg: <span style="color:#e0e6ed;font-weight:600">' + r.league_avg_cards + '</span>' +
+      '</div>' +
+
+      // Score breakdown
+      '<div style="font-size:0.7rem;color:#556677;margin-top:4px;">' +
+        'Breakdown: Cards ' + r.home_card_score + '/' + r.away_card_score +
+        ' &middot; Fouls ' + r.home_foul_score + '/' + r.away_foul_score +
+        ' &middot; Position ' + r.home_position_score + '/' + r.away_position_score +
+        ' &middot; H2H ' + r.h2h_score +
+        ' &middot; Derby ' + r.derby_score +
+      '</div>' +
     '</div>';
   }
   body.innerHTML = html;

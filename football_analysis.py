@@ -706,6 +706,39 @@ def build_position_map(season_id: int) -> dict[int, int]:
     return pos_map
 
 
+def get_h2h_matches(team_a_id: int, team_b_id: int, season_id: int | None = None) -> list[dict]:
+    """Return head-to-head matches between two teams from league-matches data.
+
+    Each entry is the raw match dict (not extracted).  Results are sorted by
+    date descending (most recent first).
+    """
+    if not season_id:
+        return []
+    try:
+        all_matches = fetch_league_matches(season_id)
+    except Exception:
+        return []
+    h2h = []
+    for m in all_matches:
+        if m.get("status") != "complete":
+            continue
+        hid = int(m.get("homeID", 0) or 0)
+        aid = int(m.get("awayID", 0) or 0)
+        if (hid == team_a_id and aid == team_b_id) or (hid == team_b_id and aid == team_a_id):
+            h2h.append(m)
+    h2h.sort(key=lambda m: m.get("date_unix", 0), reverse=True)
+    return h2h
+
+
+def get_league_team_count(season_id: int) -> int:
+    """Return the number of teams in a league season (from league table)."""
+    try:
+        table = fetch_league_table(season_id)
+        return len(table) if table else 20
+    except Exception:
+        return 20
+
+
 # ---------------------------------------------------------------------------
 # Analysis calculations
 # ---------------------------------------------------------------------------

@@ -6,7 +6,6 @@ Shows today's fixtures and lets you analyze individual matches on demand
 to conserve API credits.
 """
 
-import math
 import os
 import threading
 from datetime import datetime, timezone
@@ -918,220 +917,186 @@ def over15fh_status():
 
 
 # ---------------------------------------------------------------------------
-# Over 3.5 Cards – Poisson / Negative Binomial model
+# Over 3.5 Cards – Aggression Score Model (1-100)
 # ---------------------------------------------------------------------------
 
-# Minimum matches with card data required per team before we trust the data.
-# Below this threshold the team's contribution is replaced by the league avg.
-_MIN_CARD_MATCHES = 3
-
-# Default fouls-per-game when a team lacks data (league-neutral estimate)
-_DEFAULT_FOULS_PG = 12.0
-
-
-def _poisson_cdf(lam, k):
-    """Compute P(X <= k) for Poisson(lam)."""
-    if lam <= 0:
-        return 1.0 if k >= 0 else 0.0
-    cdf = 0.0
-    for i in range(k + 1):
-        cdf += math.exp(-lam) * (lam ** i) / math.factorial(i)
-    return min(cdf, 1.0)
-
-
-def _neg_binom_cdf(mean, var, k):
-    """Compute P(X <= k) for Negative Binomial (mean/variance parameterisation).
-    Falls back to Poisson when variance <= mean.
-    """
-    if var <= mean or mean <= 0:
-        return _poisson_cdf(mean, k)
-    p = mean / var          # success probability
-    r = mean * p / (1 - p)  # shape = mean² / (var - mean)
-    cdf = 0.0
-    for i in range(k + 1):
-        log_pmf = (math.lgamma(i + r) - math.lgamma(i + 1) - math.lgamma(r)
-                   + i * math.log(1 - p) + r * math.log(p))
-        cdf += math.exp(log_pmf)
-    return min(cdf, 1.0)
-
-
-def _weighted_avg(values, alpha=0.15):
-    """Exponentially-decay weighted average (index 0 = most recent)."""
-    if not values:
-        return 0.0
-    weights = [math.exp(-alpha * i) for i in range(len(values))]
-    tw = sum(weights)
-    return sum(v * w for v, w in zip(values, weights)) / tw
-
-
-def _compute_league_card_stats(season_id):
-    """Return (avg_total_cards, variance, avg_team_cards, avg_fouls) for a league."""
-    matches = fa.fetch_league_matches(season_id)
-    card_counts = []
-    team_card_counts = []
-    foul_counts = []
-    for m in matches:
-        if m.get("status") != "complete":
-            continue
-        hy = fa.safe_int(m.get("team_a_yellow_cards",
-              m.get("home_yellow_cards", m.get("homeYellowCards", -1))))
-        ay = fa.safe_int(m.get("team_b_yellow_cards",
-              m.get("away_yellow_cards", m.get("awayYellowCards", -1))))
-        if hy < 0 or ay < 0:
-            continue
-        hr = fa.safe_int(m.get("team_a_red_cards",
-              m.get("home_red_cards", m.get("homeRedCards", -1))))
-        ar = fa.safe_int(m.get("team_b_red_cards",
-              m.get("away_red_cards", m.get("awayRedCards", -1))))
-        total = hy + ay + max(hr, 0) + max(ar, 0)
-        card_counts.append(total)
-        # Average per-team cards (home side as representative)
-        team_card_counts.append(hy + max(hr, 0))
-        team_card_counts.append(ay + max(ar, 0))
-        # Fouls
-        hf = fa.safe_int(m.get("team_a_fouls",
-              m.get("home_fouls", m.get("homeFouls", -1))))
-        af = fa.safe_int(m.get("team_b_fouls",
-              m.get("away_fouls", m.get("awayFouls", -1))))
-        if hf >= 0:
-            foul_counts.append(hf)
-        if af >= 0:
-            foul_counts.append(af)
-    if not card_counts:
-        return 3.8, 3.0, 1.9, _DEFAULT_FOULS_PG
-    avg = sum(card_counts) / len(card_counts)
-    var = (sum((c - avg) ** 2 for c in card_counts) / len(card_counts)
-           if len(card_counts) > 1 else avg)
-    avg_team = sum(team_card_counts) / len(team_card_counts) if team_card_counts else avg / 2
-    avg_fouls = sum(foul_counts) / len(foul_counts) if foul_counts else _DEFAULT_FOULS_PG
-    return avg, var, avg_team, avg_fouls
-
-
-def _compute_referee_card_avg_from_history(season_id, referee_id):
-    """Compute referee's avg total cards from league-matches history (fallback)."""
-    matches = fa.fetch_league_matches(season_id)
-    card_counts = []
-    for m in matches:
-        if m.get("status") != "complete":
-            continue
-        mid_ref = m.get("refereeID", m.get("referee_id", 0))
-        try:
-            mid_ref = int(mid_ref) if mid_ref else 0
-        except (ValueError, TypeError):
-            mid_ref = 0
-        if mid_ref != referee_id:
-            continue
-        hy = fa.safe_int(m.get("team_a_yellow_cards",
-              m.get("home_yellow_cards", m.get("homeYellowCards", -1))))
-        ay = fa.safe_int(m.get("team_b_yellow_cards",
-              m.get("away_yellow_cards", m.get("awayYellowCards", -1))))
-        if hy < 0 or ay < 0:
-            continue
-        hr = fa.safe_int(m.get("team_a_red_cards",
-              m.get("home_red_cards", m.get("homeRedCards", -1))))
-        ar = fa.safe_int(m.get("team_b_red_cards",
-              m.get("away_red_cards", m.get("awayRedCards", -1))))
-        total = hy + ay + max(hr, 0) + max(ar, 0)
-        card_counts.append(total)
-    if not card_counts:
-        return None, 0
-    return sum(card_counts) / len(card_counts), len(card_counts)
-
-
-def _resolve_referee(referee_id, referee_name_hint, season_id):
-    """Resolve referee name and average cards using multiple data sources.
-
-    Priority:
-      1. FootyStats /referee endpoint (gets name + potentially card stats)
-      2. FootyStats /league-referees for the season (name + per-league stats)
-      3. Compute from league-matches history (our own calculation)
-
-    Returns (name: str, avg_cards: float | None, match_count: int).
-    """
-    name = referee_name_hint or ""
-    avg_cards = None
-    match_count = 0
-
-    # --- Source 1: Individual referee endpoint ---
-    if referee_id:
-        ref_data = fa.fetch_referee(referee_id)
-        if ref_data:
-            name = name or ref_data.get("full_name", ref_data.get("name", ""))
-            # The API may return card stats under various field names
-            for field in ("cards_per_game", "avg_cards_per_game",
-                          "cards_per_match", "average_cards",
-                          "yellow_cards_per_game"):
-                val = ref_data.get(field)
-                if val is not None:
-                    try:
-                        avg_cards = float(val)
-                        if avg_cards > 0:
-                            match_count = int(ref_data.get(
-                                "matches", ref_data.get("appearances", 50)
-                            ))
-                            break
-                    except (ValueError, TypeError):
-                        continue
-
-    # --- Source 2: League referees endpoint ---
-    if avg_cards is None and season_id and referee_id:
-        league_refs = fa.fetch_league_referees(season_id)
-        for ref in league_refs:
-            rid = ref.get("id", ref.get("referee_id", 0))
-            try:
-                rid = int(rid) if rid else 0
-            except (ValueError, TypeError):
-                rid = 0
-            if rid != referee_id:
-                continue
-            name = name or ref.get("full_name", ref.get("name", ""))
-            for field in ("cards_per_game", "avg_cards_per_game",
-                          "cards_per_match", "average_cards",
-                          "yellow_cards_per_game"):
-                val = ref.get(field)
-                if val is not None:
-                    try:
-                        avg_cards = float(val)
-                        if avg_cards > 0:
-                            match_count = int(ref.get(
-                                "matches", ref.get("appearances", 0)
-                            ))
-                            break
-                    except (ValueError, TypeError):
-                        continue
-            break  # found the referee entry
-
-    # --- Source 3: Compute from league-matches history ---
-    if avg_cards is None and season_id and referee_id:
-        avg_cards, match_count = _compute_referee_card_avg_from_history(
-            season_id, referee_id
-        )
-
-    return name.strip() or "", avg_cards, match_count
-
-
+# Common words stripped when detecting derbies
 _COMMON_FOOTBALL_WORDS = frozenset({
     "fc", "cf", "sc", "ac", "as", "us", "ss", "city", "united",
     "athletic", "real", "sporting", "club", "de", "al", "the",
 })
 
 
+def _compute_league_avg_cards(season_id):
+    """Return average total match cards for a league (used for H2H comparison)."""
+    matches = fa.fetch_league_matches(season_id)
+    card_counts = []
+    for m in matches:
+        if m.get("status") != "complete":
+            continue
+        hy = fa.safe_int(m.get("team_a_yellow_cards",
+              m.get("home_yellow_cards", m.get("homeYellowCards", -1))))
+        ay = fa.safe_int(m.get("team_b_yellow_cards",
+              m.get("away_yellow_cards", m.get("awayYellowCards", -1))))
+        if hy < 0 or ay < 0:
+            continue
+        hr = fa.safe_int(m.get("team_a_red_cards",
+              m.get("home_red_cards", m.get("homeRedCards", -1))))
+        ar = fa.safe_int(m.get("team_b_red_cards",
+              m.get("away_red_cards", m.get("awayRedCards", -1))))
+        total = hy + ay + max(hr, 0) + max(ar, 0)
+        card_counts.append(total)
+    if not card_counts:
+        return 3.8
+    return sum(card_counts) / len(card_counts)
+
+
+def _extract_card_foul_data(last10):
+    """Extract card and foul arrays from last-10 stats, split by home/away.
+
+    Returns dict with keys:
+      all_cards, all_fouls, home_cards, home_fouls, away_cards, away_fouls
+    Each value list is most-recent-first.
+    """
+    all_cards, all_fouls = [], []
+    home_cards, home_fouls = [], []
+    away_cards, away_fouls = [], []
+    for m in last10:
+        y = m.get("yellows", -1)
+        r = m.get("reds", -1)
+        f = m.get("fouls", -1)
+        if y < 0:
+            continue
+        cards = y + max(r, 0)
+        fouls = f if f >= 0 else 0
+        all_cards.append(cards)
+        all_fouls.append(fouls)
+        if m.get("is_home"):
+            home_cards.append(cards)
+            home_fouls.append(fouls)
+        else:
+            away_cards.append(cards)
+            away_fouls.append(fouls)
+    return {
+        "all_cards": all_cards, "all_fouls": all_fouls,
+        "home_cards": home_cards, "home_fouls": home_fouls,
+        "away_cards": away_cards, "away_fouls": away_fouls,
+    }
+
+
+def _safe_avg(vals):
+    """Average of a list, or 0 if empty."""
+    return sum(vals) / len(vals) if vals else 0.0
+
+
+def _compute_aggression_score(data, is_home_upcoming, position, total_teams,
+                               is_derby, h2h_card_avg, league_avg_cards):
+    """Compute a team's Aggression Score (1-100).
+
+    Components:
+      1. Card Rate (40 pts max) — avg cards/game from last 10 with home/away
+         split weighted toward the upcoming venue.
+      2. Foul Rate (25 pts max) — avg fouls/game, same venue-weighting.
+      3. League Position (15 pts max) — relegation / title fight boost.
+      4. H2H Factor (10 pts max) — how physical H2H matches are vs league avg.
+      5. Derby Boost (10 pts max) — significant boost for local rivalries.
+    """
+    # --- 1. Card Rate (0-40) -----------------------------------------------
+    # Venue-weighted average: 65% venue-matching form, 35% other venue
+    if is_home_upcoming:
+        venue_cards = data["home_cards"]
+        other_cards = data["away_cards"]
+    else:
+        venue_cards = data["away_cards"]
+        other_cards = data["home_cards"]
+
+    if venue_cards and other_cards:
+        avg_cards = _safe_avg(venue_cards) * 0.65 + _safe_avg(other_cards) * 0.35
+    elif venue_cards:
+        avg_cards = _safe_avg(venue_cards)
+    elif other_cards:
+        avg_cards = _safe_avg(other_cards)
+    else:
+        avg_cards = _safe_avg(data["all_cards"])
+
+    # Scale: 0 cards/game → 0 pts, 4+ cards/game → 40 pts
+    card_score = min(avg_cards / 4.0, 1.0) * 40.0
+
+    # --- 2. Foul Rate (0-25) -----------------------------------------------
+    if is_home_upcoming:
+        venue_fouls = data["home_fouls"]
+        other_fouls = data["away_fouls"]
+    else:
+        venue_fouls = data["away_fouls"]
+        other_fouls = data["home_fouls"]
+
+    if venue_fouls and other_fouls:
+        avg_fouls = _safe_avg(venue_fouls) * 0.65 + _safe_avg(other_fouls) * 0.35
+    elif venue_fouls:
+        avg_fouls = _safe_avg(venue_fouls)
+    elif other_fouls:
+        avg_fouls = _safe_avg(other_fouls)
+    else:
+        avg_fouls = _safe_avg(data["all_fouls"])
+
+    # Scale: 0 fouls → 0 pts, 16+ fouls → 25 pts
+    foul_score = min(avg_fouls / 16.0, 1.0) * 25.0
+
+    # --- 3. League Position (0-15) ------------------------------------------
+    position_score = 0.0
+    if position and total_teams:
+        relegation_zone = total_teams - 2  # bottom 3
+        near_relegation = total_teams - 4  # bottom 5
+        if position >= relegation_zone or position <= 3:
+            position_score = 15.0
+        elif position >= near_relegation or position <= 5:
+            position_score = 10.0
+        else:
+            position_score = 5.0
+
+    # --- 4. H2H Factor (0-10) ----------------------------------------------
+    h2h_score = 0.0
+    if h2h_card_avg is not None and league_avg_cards > 0:
+        ratio = h2h_card_avg / league_avg_cards
+        if ratio >= 1.5:
+            h2h_score = 10.0
+        elif ratio >= 1.2:
+            h2h_score = 7.0
+        elif ratio >= 1.0:
+            h2h_score = 4.0
+        else:
+            h2h_score = max(0.0, ratio * 3.0)
+
+    # --- 5. Derby Boost (0-10) ----------------------------------------------
+    derby_score = 10.0 if is_derby else 0.0
+
+    total = card_score + foul_score + position_score + h2h_score + derby_score
+    return {
+        "total": round(min(max(total, 1.0), 100.0), 1),
+        "card_score": round(card_score, 1),
+        "foul_score": round(foul_score, 1),
+        "position_score": round(position_score, 1),
+        "h2h_score": round(h2h_score, 1),
+        "derby_score": round(derby_score, 1),
+        "avg_cards_pg": round(avg_cards, 2),
+        "avg_fouls_pg": round(avg_fouls, 2),
+    }
+
+
 def _run_over35cards():
-    """Analyse all fixtures for Over 3.5 Total Cards using a probabilistic model.
+    """Analyse all fixtures for Over 3.5 Total Cards using Aggression Score model.
 
-    Model:
-      λ = team_interaction × league_adj × referee_factor × importance × derby
-    Distribution:
-      Negative Binomial when overdispersed, Poisson otherwise.
-    Output:
-      P(total_cards >= 4), filtered to >= 60%, ranked descending.
+    Per-team Aggression Score (1-100) computed from:
+      - Cards/fouls from last 10 matches (home/away venue split)
+      - League position context (relegation / title fight boost)
+      - Head-to-head factor (historical H2H cards vs league average)
+      - Derby boost (significant uplift for local derbies)
 
-    Key safeguards:
-      - Both teams must have >= _MIN_CARD_MATCHES; missing team data is
-        replaced by league averages and the match is flagged as partial data.
-      - Referee data is resolved via the /referee and /league-referees API
-        endpoints, falling back to computing from league-matches history.
-      - Confidence tier accounts for data quality (partial → cap at Moderate).
+    Skip logic:
+      - Requires last-10 data for BOTH teams (min 3 matches with card data).
+      - Requires min 2 H2H matches in the same league season.
+
+    Output: Top 5 selections ranked by combined aggression score.
     """
     with _lock:
         if _state["over35c_status"] == "running":
@@ -1144,9 +1109,10 @@ def _run_over35cards():
         now_ts = int(datetime.now(timezone.utc).timestamp())
         cutoff_ts = now_ts + 48 * 3600  # next 48 hours
 
-        # Caches (lazily populated, shared across fixtures in the same league)
-        league_baselines: dict[int, tuple[float, float, float, float]] = {}
-        referee_cache: dict[int, tuple[str, float | None, int]] = {}
+        # Caches (lazily populated per league)
+        league_avg_cache: dict[int, float] = {}
+        position_cache: dict[int, dict[int, int]] = {}
+        team_count_cache: dict[int, int] = {}
 
         results = []
 
@@ -1180,183 +1146,88 @@ def _run_over35cards():
                     except (ValueError, TypeError):
                         continue
 
-            # --- League baseline (cached) ----------------------------------
-            if season_id and season_id not in league_baselines:
-                league_baselines[season_id] = _compute_league_card_stats(season_id)
-            lg_avg, lg_var, lg_team_avg, lg_fouls_avg = league_baselines.get(
-                season_id, (3.8, 3.0, 1.9, _DEFAULT_FOULS_PG)
-            )
-
-            # --- Referee resolution (cached per referee_id) ----------------
-            referee_name_hint = (
-                fix.get("referee") or fix.get("referee_name") or ""
-            ).strip()
-            referee_id = fix.get("refereeID", fix.get("referee_id", 0))
-            try:
-                referee_id = int(referee_id) if referee_id else 0
-            except (ValueError, TypeError):
-                referee_id = 0
-
-            if referee_id and referee_id not in referee_cache:
-                referee_cache[referee_id] = _resolve_referee(
-                    referee_id, referee_name_hint, season_id
-                )
-            if referee_id:
-                ref_name, ref_avg_cards, ref_matches = referee_cache[referee_id]
-            else:
-                ref_name, ref_avg_cards, ref_matches = "", None, 0
-
-            # Use the best available referee name
-            referee_display = ref_name or referee_name_hint or ""
+            if not season_id:
+                continue
 
             # --- Team last-10 stats ----------------------------------------
             home_last10 = fa.get_team_last10(home_id, season_id)
             away_last10 = fa.get_team_last10(away_id, season_id)
 
-            if not home_last10 and not away_last10:
+            # SKIP: require last-10 data for BOTH teams (min 3 with card data)
+            home_data = _extract_card_foul_data(home_last10)
+            away_data = _extract_card_foul_data(away_last10)
+            if len(home_data["all_cards"]) < 3 or len(away_data["all_cards"]) < 3:
                 continue
 
-            # -- Extract card/foul arrays (most-recent-first) ---------------
-            home_match_cards, home_team_cards, home_fouls_list = [], [], []
-            for m in home_last10:
-                my = m.get("match_yellows", -1)
-                mr = m.get("match_reds", -1)
-                if my >= 0:
-                    home_match_cards.append(my + max(mr, 0))
-                ty = m.get("yellows", -1)
-                tr = m.get("reds", -1)
-                if ty >= 0:
-                    home_team_cards.append(ty + max(tr, 0))
-                f = m.get("fouls", -1)
-                if f >= 0:
-                    home_fouls_list.append(f)
-
-            away_match_cards, away_team_cards, away_fouls_list = [], [], []
-            for m in away_last10:
-                my = m.get("match_yellows", -1)
-                mr = m.get("match_reds", -1)
-                if my >= 0:
-                    away_match_cards.append(my + max(mr, 0))
-                ty = m.get("yellows", -1)
-                tr = m.get("reds", -1)
-                if ty >= 0:
-                    away_team_cards.append(ty + max(tr, 0))
-                f = m.get("fouls", -1)
-                if f >= 0:
-                    away_fouls_list.append(f)
-
-            # -- Data-quality gate ------------------------------------------
-            # Both teams MUST have sufficient data or we substitute league avg.
-            home_has_data = len(home_match_cards) >= _MIN_CARD_MATCHES
-            away_has_data = len(away_match_cards) >= _MIN_CARD_MATCHES
-
-            # If NEITHER team has any card data at all, skip entirely
-            if not home_match_cards and not away_match_cards:
+            # --- H2H data (min 2 matches required) -------------------------
+            h2h_matches = fa.get_h2h_matches(home_id, away_id, season_id)
+            if len(h2h_matches) < 2:
                 continue
 
-            data_quality = "full"
+            # Compute H2H average cards per match
+            h2h_card_counts = []
+            for m in h2h_matches:
+                hy = fa.safe_int(m.get("team_a_yellow_cards",
+                      m.get("home_yellow_cards", m.get("homeYellowCards", -1))))
+                ay = fa.safe_int(m.get("team_b_yellow_cards",
+                      m.get("away_yellow_cards", m.get("awayYellowCards", -1))))
+                if hy < 0 or ay < 0:
+                    continue
+                hr = fa.safe_int(m.get("team_a_red_cards",
+                      m.get("home_red_cards", m.get("homeRedCards", -1))))
+                ar = fa.safe_int(m.get("team_b_red_cards",
+                      m.get("away_red_cards", m.get("awayRedCards", -1))))
+                h2h_card_counts.append(hy + ay + max(hr, 0) + max(ar, 0))
 
-            if home_has_data:
-                home_w_match = _weighted_avg(home_match_cards)
-                home_w_team = _weighted_avg(home_team_cards) if home_team_cards else lg_team_avg
-                home_w_fouls = _weighted_avg(home_fouls_list) if home_fouls_list else lg_fouls_avg
-            else:
-                # Insufficient home data → use league averages
-                home_w_match = lg_avg
-                home_w_team = lg_team_avg
-                home_w_fouls = lg_fouls_avg
-                data_quality = "partial"
+            h2h_card_avg = (_safe_avg(h2h_card_counts)
+                            if h2h_card_counts else None)
 
-            if away_has_data:
-                away_w_match = _weighted_avg(away_match_cards)
-                away_w_team = _weighted_avg(away_team_cards) if away_team_cards else lg_team_avg
-                away_w_fouls = _weighted_avg(away_fouls_list) if away_fouls_list else lg_fouls_avg
-            else:
-                away_w_match = lg_avg
-                away_w_team = lg_team_avg
-                away_w_fouls = lg_fouls_avg
-                data_quality = "partial"
+            # --- League average cards (cached) ------------------------------
+            if season_id not in league_avg_cache:
+                league_avg_cache[season_id] = _compute_league_avg_cards(season_id)
+            lg_avg_cards = league_avg_cache[season_id]
 
-            if not home_has_data and not away_has_data:
-                data_quality = "low"
+            # --- League positions (cached) ----------------------------------
+            if season_id not in position_cache:
+                position_cache[season_id] = fa.build_position_map(season_id)
+            if season_id not in team_count_cache:
+                team_count_cache[season_id] = fa.get_league_team_count(season_id)
+            pos_map = position_cache[season_id]
+            total_teams = team_count_cache[season_id]
 
-            # -- Team interaction lambda ------------------------------------
-            team_lambda = (home_w_match + away_w_match) / 2
+            home_pos = pos_map.get(home_id, 0)
+            away_pos = pos_map.get(away_id, 0)
 
-            # -- League baseline adjustment ---------------------------------
-            if lg_avg > 0:
-                league_adj = 0.7 + 0.3 * (lg_avg / max(team_lambda, 0.1))
-                league_adj = max(0.85, min(1.15, league_adj))
-            else:
-                league_adj = 1.0
-
-            # -- Referee factor ---------------------------------------------
-            referee_factor = 1.0
-            has_referee = False
-            if ref_avg_cards is not None and ref_avg_cards > 0 and lg_avg > 0:
-                referee_factor = ref_avg_cards / lg_avg
-                referee_factor = max(0.6, min(1.6, referee_factor))
-                has_referee = True
-
-            # -- Match importance factor ------------------------------------
-            importance_factor = 1.0
-
-            # -- Derby multiplier -------------------------------------------
-            derby_factor = 1.0
+            # --- Derby detection -------------------------------------------
             home_words = set(home_name.lower().split()) - _COMMON_FOOTBALL_WORDS
             away_words = set(away_name.lower().split()) - _COMMON_FOOTBALL_WORDS
-            if home_words & away_words:
-                derby_factor = 1.15
+            is_derby = bool(home_words & away_words)
 
-            # -- Final λ ----------------------------------------------------
-            lam = (team_lambda * league_adj * referee_factor
-                   * importance_factor * derby_factor)
-            lam = max(0.5, min(12.0, lam))
+            # --- Compute per-team Aggression Scores -------------------------
+            home_agg = _compute_aggression_score(
+                home_data, is_home_upcoming=True,
+                position=home_pos, total_teams=total_teams,
+                is_derby=is_derby,
+                h2h_card_avg=h2h_card_avg,
+                league_avg_cards=lg_avg_cards,
+            )
+            away_agg = _compute_aggression_score(
+                away_data, is_home_upcoming=False,
+                position=away_pos, total_teams=total_teams,
+                is_derby=is_derby,
+                h2h_card_avg=h2h_card_avg,
+                league_avg_cards=lg_avg_cards,
+            )
 
-            # -- Variance for distribution choice ---------------------------
-            def _sample_var(vals):
-                if len(vals) < 2:
-                    return lg_var
-                m = sum(vals) / len(vals)
-                return sum((c - m) ** 2 for c in vals) / len(vals)
+            combined_score = round((home_agg["total"] + away_agg["total"]) / 2, 1)
 
-            h_var = _sample_var(home_match_cards) if home_has_data else lg_var
-            a_var = _sample_var(away_match_cards) if away_has_data else lg_var
-            combined_var = (h_var + a_var) / 2
-
-            # -- P(total cards >= 4) ----------------------------------------
-            if combined_var > lam * 1.3:
-                prob = 1.0 - _neg_binom_cdf(lam, combined_var, 3)
-                model_used = "NegBinom"
-            else:
-                prob = 1.0 - _poisson_cdf(lam, 3)
-                model_used = "Poisson"
-
-            prob_pct = round(prob * 100, 2)
-
-            if prob_pct < 60:
-                continue
-
-            # -- Confidence tier (accounts for data quality) ----------------
-            if data_quality == "low":
-                tier = "Low Data"
-            elif data_quality == "partial":
-                # Cap at Moderate when one team lacks data
-                tier = "Moderate"
-            elif prob_pct >= 82 and has_referee:
+            # --- Confidence tier -------------------------------------------
+            if combined_score >= 70:
                 tier = "Elite"
-            elif prob_pct >= 82:
-                # High probability but no referee data → cap at Strong
-                tier = "Strong"
-            elif prob_pct >= 70:
+            elif combined_score >= 55:
                 tier = "Strong"
             else:
                 tier = "Moderate"
-
-            # -- Aggression score (display) ---------------------------------
-            home_aggression = home_w_fouls + home_w_team * 2.0
-            away_aggression = away_w_fouls + away_w_team * 2.0
-            combined_aggression = round(home_aggression + away_aggression, 1)
 
             results.append({
                 "home_name": home_name,
@@ -1364,28 +1235,38 @@ def _run_over35cards():
                 "league": league,
                 "kick_off": ko_str,
                 "kick_off_unix": ko_unix,
-                "referee_name": referee_display or "Not Available",
-                "referee_avg_cards": round(ref_avg_cards, 1) if ref_avg_cards else None,
-                "referee_matches": ref_matches,
-                "combined_aggression": combined_aggression,
-                "projected_cards": round(lam, 2),
-                "probability": prob_pct,
+                "combined_score": combined_score,
+                "home_aggression": home_agg["total"],
+                "away_aggression": away_agg["total"],
+                "home_card_score": home_agg["card_score"],
+                "away_card_score": away_agg["card_score"],
+                "home_foul_score": home_agg["foul_score"],
+                "away_foul_score": away_agg["foul_score"],
+                "home_position_score": home_agg["position_score"],
+                "away_position_score": away_agg["position_score"],
+                "h2h_score": home_agg["h2h_score"],
+                "derby_score": home_agg["derby_score"],
+                "home_avg_cards_pg": home_agg["avg_cards_pg"],
+                "away_avg_cards_pg": away_agg["avg_cards_pg"],
+                "home_avg_fouls_pg": home_agg["avg_fouls_pg"],
+                "away_avg_fouls_pg": away_agg["avg_fouls_pg"],
+                "home_data_games": len(home_data["all_cards"]),
+                "away_data_games": len(away_data["all_cards"]),
+                "h2h_matches": len(h2h_card_counts),
+                "h2h_avg_cards": round(h2h_card_avg, 1) if h2h_card_avg is not None else None,
+                "league_avg_cards": round(lg_avg_cards, 1),
+                "home_position": home_pos,
+                "away_position": away_pos,
+                "derby": is_derby,
                 "confidence_tier": tier,
-                "data_quality": data_quality,
-                "home_avg_match_cards": round(home_w_match, 1),
-                "away_avg_match_cards": round(away_w_match, 1),
-                "home_fouls_avg": round(home_w_fouls, 1),
-                "away_fouls_avg": round(away_w_fouls, 1),
-                "home_data_games": len(home_match_cards),
-                "away_data_games": len(away_match_cards),
-                "derby": derby_factor > 1.0,
-                "model_type": model_used,
             })
 
-        results.sort(key=lambda r: r["probability"], reverse=True)
+        # Sort by combined aggression score descending, take top 5
+        results.sort(key=lambda r: r["combined_score"], reverse=True)
+        top5 = results[:5]
 
         with _lock:
-            _state["over35c_results"] = results
+            _state["over35c_results"] = top5
             _state["over35c_status"] = "done"
 
     except Exception as e:

@@ -6,6 +6,7 @@ Shows today's fixtures and lets you analyze individual matches on demand
 to conserve API credits.
 """
 
+import math
 import os
 import threading
 from datetime import datetime, timezone
@@ -178,6 +179,9 @@ _state = {
     "over15fh_status": "idle",  # idle | running | done
     "over15fh_results": [],     # list of top first-half goals picks
     "over15fh_error": None,
+    "over35c_status": "idle",   # idle | running | done
+    "over35c_results": [],      # list of high-prob over 3.5 cards picks
+    "over35c_error": None,
 }
 
 
@@ -909,6 +913,365 @@ def over15fh_status():
             "status": _state["over15fh_status"],
             "results": _state["over15fh_results"],
             "error": _state["over15fh_error"],
+            "api_credits_used": fa.api_credits_used,
+        })
+
+
+# ---------------------------------------------------------------------------
+# Over 3.5 Cards – Poisson / Negative Binomial model
+# ---------------------------------------------------------------------------
+
+def _poisson_cdf(lam, k):
+    """Compute P(X <= k) for Poisson(lam)."""
+    if lam <= 0:
+        return 1.0 if k >= 0 else 0.0
+    cdf = 0.0
+    for i in range(k + 1):
+        cdf += math.exp(-lam) * (lam ** i) / math.factorial(i)
+    return min(cdf, 1.0)
+
+
+def _neg_binom_cdf(mean, var, k):
+    """Compute P(X <= k) for Negative Binomial (mean/variance parameterisation).
+    Falls back to Poisson when variance <= mean.
+    """
+    if var <= mean or mean <= 0:
+        return _poisson_cdf(mean, k)
+    p = mean / var          # success probability
+    r = mean * p / (1 - p)  # shape = mean² / (var - mean)
+    cdf = 0.0
+    for i in range(k + 1):
+        log_pmf = (math.lgamma(i + r) - math.lgamma(i + 1) - math.lgamma(r)
+                   + i * math.log(1 - p) + r * math.log(p))
+        cdf += math.exp(log_pmf)
+    return min(cdf, 1.0)
+
+
+def _weighted_avg(values, alpha=0.15):
+    """Exponentially-decay weighted average (index 0 = most recent)."""
+    if not values:
+        return 0.0
+    weights = [math.exp(-alpha * i) for i in range(len(values))]
+    tw = sum(weights)
+    return sum(v * w for v, w in zip(values, weights)) / tw
+
+
+def _compute_league_card_stats(season_id):
+    """Return (avg_total_cards, variance) for completed matches in a league."""
+    matches = fa.fetch_league_matches(season_id)
+    card_counts = []
+    for m in matches:
+        if m.get("status") != "complete":
+            continue
+        hy = fa.safe_int(m.get("team_a_yellow_cards",
+              m.get("home_yellow_cards", m.get("homeYellowCards", -1))))
+        ay = fa.safe_int(m.get("team_b_yellow_cards",
+              m.get("away_yellow_cards", m.get("awayYellowCards", -1))))
+        if hy < 0 or ay < 0:
+            continue
+        hr = fa.safe_int(m.get("team_a_red_cards",
+              m.get("home_red_cards", m.get("homeRedCards", -1))))
+        ar = fa.safe_int(m.get("team_b_red_cards",
+              m.get("away_red_cards", m.get("awayRedCards", -1))))
+        total = hy + ay + max(hr, 0) + max(ar, 0)
+        card_counts.append(total)
+    if not card_counts:
+        return 3.8, 3.0  # sensible fallback
+    avg = sum(card_counts) / len(card_counts)
+    var = (sum((c - avg) ** 2 for c in card_counts) / len(card_counts)
+           if len(card_counts) > 1 else avg)
+    return avg, var
+
+
+def _compute_referee_card_avg(season_id, referee_id):
+    """Return the referee's average total cards per match (or None)."""
+    matches = fa.fetch_league_matches(season_id)
+    card_counts = []
+    for m in matches:
+        if m.get("status") != "complete":
+            continue
+        mid_ref = m.get("refereeID", m.get("referee_id", 0))
+        try:
+            mid_ref = int(mid_ref) if mid_ref else 0
+        except (ValueError, TypeError):
+            mid_ref = 0
+        if mid_ref != referee_id:
+            continue
+        hy = fa.safe_int(m.get("team_a_yellow_cards",
+              m.get("home_yellow_cards", m.get("homeYellowCards", -1))))
+        ay = fa.safe_int(m.get("team_b_yellow_cards",
+              m.get("away_yellow_cards", m.get("awayYellowCards", -1))))
+        if hy < 0 or ay < 0:
+            continue
+        hr = fa.safe_int(m.get("team_a_red_cards",
+              m.get("home_red_cards", m.get("homeRedCards", -1))))
+        ar = fa.safe_int(m.get("team_b_red_cards",
+              m.get("away_red_cards", m.get("awayRedCards", -1))))
+        total = hy + ay + max(hr, 0) + max(ar, 0)
+        card_counts.append(total)
+    if not card_counts:
+        return None
+    return sum(card_counts) / len(card_counts)
+
+
+_COMMON_FOOTBALL_WORDS = frozenset({
+    "fc", "cf", "sc", "ac", "as", "us", "ss", "city", "united",
+    "athletic", "real", "sporting", "club", "de", "al", "the",
+})
+
+
+def _run_over35cards():
+    """Analyse all fixtures for Over 3.5 Total Cards using a probabilistic model.
+
+    Model: λ = team_interaction × referee_factor × importance × derby
+    Distribution: Negative Binomial when overdispersed, Poisson otherwise.
+    Output: P(total_cards >= 4), filtered to >= 60 %, ranked descending.
+    """
+    with _lock:
+        if _state["over35c_status"] == "running":
+            return
+        _state["over35c_status"] = "running"
+        _state["over35c_error"] = None
+        fixtures = list(_state["fixtures"])
+
+    try:
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        cutoff_ts = now_ts + 48 * 3600  # next 48 hours
+
+        # Caches (populated lazily, shared across fixtures in same league)
+        league_baselines: dict[int, tuple[float, float]] = {}
+        referee_cache: dict[tuple[int, int], float | None] = {}
+
+        results = []
+
+        for fix in fixtures:
+            ko_unix = int(fix.get("date_unix", 0) or 0)
+            # Only matches within next 48 hours (allow 1 h grace for kickoff)
+            if ko_unix and (ko_unix < now_ts - 3600 or ko_unix > cutoff_ts):
+                continue
+
+            home_name = fix.get("home_name", "Home")
+            away_name = fix.get("away_name", "Away")
+            home_id = int(fix.get("homeID", fix.get("home_id", 0)))
+            away_id = int(fix.get("awayID", fix.get("away_id", 0)))
+            league = fix.get("league_name", fix.get("competition_name", "Unknown"))
+            ko_str = (
+                datetime.fromtimestamp(ko_unix, tz=timezone.utc).strftime("%H:%M UTC")
+                if ko_unix else "TBD"
+            )
+
+            if not home_id or not away_id:
+                continue
+
+            # --- Season ID -------------------------------------------------
+            season_id = None
+            for key in ("competition_id", "season_id", "league_id", "season"):
+                val = fix.get(key)
+                if val is not None:
+                    try:
+                        season_id = int(val)
+                        if season_id > 0:
+                            break
+                    except (ValueError, TypeError):
+                        continue
+
+            # --- Referee info ----------------------------------------------
+            referee_name = (fix.get("referee") or fix.get("referee_name") or "").strip()
+            referee_id = fix.get("refereeID", fix.get("referee_id", 0))
+            try:
+                referee_id = int(referee_id) if referee_id else 0
+            except (ValueError, TypeError):
+                referee_id = 0
+
+            # --- Team last-10 stats ----------------------------------------
+            home_last10 = fa.get_team_last10(home_id, season_id)
+            away_last10 = fa.get_team_last10(away_id, season_id)
+
+            if not home_last10 and not away_last10:
+                continue
+
+            # -- Extract card/foul arrays (most-recent-first) ---------------
+            home_match_cards, home_team_cards, home_fouls_list = [], [], []
+            for m in home_last10:
+                my = m.get("match_yellows", -1)
+                mr = m.get("match_reds", -1)
+                if my >= 0:
+                    home_match_cards.append(my + max(mr, 0))
+                ty = m.get("yellows", -1)
+                tr = m.get("reds", -1)
+                if ty >= 0:
+                    home_team_cards.append(ty + max(tr, 0))
+                f = m.get("fouls", -1)
+                if f >= 0:
+                    home_fouls_list.append(f)
+
+            away_match_cards, away_team_cards, away_fouls_list = [], [], []
+            for m in away_last10:
+                my = m.get("match_yellows", -1)
+                mr = m.get("match_reds", -1)
+                if my >= 0:
+                    away_match_cards.append(my + max(mr, 0))
+                ty = m.get("yellows", -1)
+                tr = m.get("reds", -1)
+                if ty >= 0:
+                    away_team_cards.append(ty + max(tr, 0))
+                f = m.get("fouls", -1)
+                if f >= 0:
+                    away_fouls_list.append(f)
+
+            if not home_match_cards and not away_match_cards:
+                continue
+
+            # -- Weighted averages (exponential decay) ----------------------
+            home_w_match = _weighted_avg(home_match_cards)
+            away_w_match = _weighted_avg(away_match_cards)
+            home_w_team = _weighted_avg(home_team_cards)
+            away_w_team = _weighted_avg(away_team_cards)
+            home_w_fouls = _weighted_avg(home_fouls_list)
+            away_w_fouls = _weighted_avg(away_fouls_list)
+
+            # -- Team interaction lambda ------------------------------------
+            if home_match_cards and away_match_cards:
+                team_lambda = (home_w_match + away_w_match) / 2
+            elif home_match_cards:
+                team_lambda = home_w_match
+            else:
+                team_lambda = away_w_match
+
+            # -- League baseline (cached) -----------------------------------
+            if season_id and season_id not in league_baselines:
+                league_baselines[season_id] = _compute_league_card_stats(season_id)
+            league_avg, league_var = league_baselines.get(season_id, (3.8, 3.0))
+
+            # -- League baseline adjustment ---------------------------------
+            # If team data deviates from league norm, anchor back slightly
+            if league_avg > 0:
+                league_adj = 0.7 + 0.3 * (league_avg / max(team_lambda, 0.1))
+                league_adj = max(0.85, min(1.15, league_adj))
+            else:
+                league_adj = 1.0
+
+            # -- Referee adjustment (cached) --------------------------------
+            ref_avg_cards = None
+            if referee_id and season_id:
+                cache_key = (season_id, referee_id)
+                if cache_key not in referee_cache:
+                    referee_cache[cache_key] = _compute_referee_card_avg(
+                        season_id, referee_id
+                    )
+                ref_avg_cards = referee_cache[cache_key]
+
+            referee_factor = 1.0
+            if ref_avg_cards and league_avg > 0:
+                referee_factor = ref_avg_cards / league_avg
+                referee_factor = max(0.6, min(1.6, referee_factor))
+
+            # -- Match importance factor ------------------------------------
+            importance_factor = 1.0
+            # (Future: query league-table positions for relegation / title race)
+
+            # -- Derby multiplier -------------------------------------------
+            derby_factor = 1.0
+            home_words = set(home_name.lower().split()) - _COMMON_FOOTBALL_WORDS
+            away_words = set(away_name.lower().split()) - _COMMON_FOOTBALL_WORDS
+            if home_words & away_words:
+                derby_factor = 1.15
+
+            # -- Final λ ----------------------------------------------------
+            lam = team_lambda * league_adj * referee_factor * importance_factor * derby_factor
+            lam = max(0.5, min(12.0, lam))
+
+            # -- Variance for distribution choice ---------------------------
+            def _sample_var(vals):
+                if len(vals) < 2:
+                    return league_var
+                m = sum(vals) / len(vals)
+                return sum((c - m) ** 2 for c in vals) / len(vals)
+
+            h_var = _sample_var(home_match_cards) if home_match_cards else league_var
+            a_var = _sample_var(away_match_cards) if away_match_cards else league_var
+            combined_var = (h_var + a_var) / 2
+
+            # -- P(total cards >= 4) ----------------------------------------
+            if combined_var > lam * 1.3:
+                prob = 1.0 - _neg_binom_cdf(lam, combined_var, 3)
+                model_used = "NegBinom"
+            else:
+                prob = 1.0 - _poisson_cdf(lam, 3)
+                model_used = "Poisson"
+
+            prob_pct = round(prob * 100, 2)
+
+            if prob_pct < 60:
+                continue
+
+            # -- Confidence tier --------------------------------------------
+            if prob_pct >= 82:
+                tier = "Elite"
+            elif prob_pct >= 70:
+                tier = "Strong"
+            else:
+                tier = "Moderate"
+
+            # -- Aggression score (display) ---------------------------------
+            home_aggression = home_w_fouls + home_w_team * 2.0
+            away_aggression = away_w_fouls + away_w_team * 2.0
+            combined_aggression = round(home_aggression + away_aggression, 1)
+
+            results.append({
+                "home_name": home_name,
+                "away_name": away_name,
+                "league": league,
+                "kick_off": ko_str,
+                "kick_off_unix": ko_unix,
+                "referee_name": referee_name or "Unknown",
+                "referee_avg_cards": round(ref_avg_cards, 1) if ref_avg_cards else None,
+                "combined_aggression": combined_aggression,
+                "projected_cards": round(lam, 2),
+                "probability": prob_pct,
+                "confidence_tier": tier,
+                "home_avg_match_cards": round(home_w_match, 1),
+                "away_avg_match_cards": round(away_w_match, 1),
+                "home_fouls_avg": round(home_w_fouls, 1),
+                "away_fouls_avg": round(away_w_fouls, 1),
+                "derby": derby_factor > 1.0,
+                "model_type": model_used,
+            })
+
+        results.sort(key=lambda r: r["probability"], reverse=True)
+
+        with _lock:
+            _state["over35c_results"] = results
+            _state["over35c_status"] = "done"
+
+    except Exception as e:
+        with _lock:
+            _state["over35c_status"] = "done"
+            _state["over35c_error"] = str(e)
+
+
+@app.route("/api/over35cards", methods=["POST"])
+def trigger_over35cards():
+    """Trigger Over 3.5 Cards analysis."""
+    with _lock:
+        if _state["over35c_status"] == "running":
+            return jsonify({"status": "running"}), 202
+        if not _state["fixtures"]:
+            return jsonify({"error": "No fixtures loaded. Refresh first."}), 400
+
+    t = threading.Thread(target=_run_over35cards, daemon=True)
+    t.start()
+    return jsonify({"status": "running"}), 202
+
+
+@app.route("/api/over35cards-status")
+def over35cards_status():
+    """Poll Over 3.5 Cards analysis status and results."""
+    with _lock:
+        return jsonify({
+            "status": _state["over35c_status"],
+            "results": _state["over35c_results"],
+            "error": _state["over35c_error"],
             "api_credits_used": fa.api_credits_used,
         })
 

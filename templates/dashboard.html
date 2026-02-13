@@ -357,6 +357,21 @@
   .over15fh-btn:hover { opacity: 0.9; transform: translateY(-1px); }
   .over15fh-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
+  .over35c-btn {
+    background: linear-gradient(135deg, #dc2626, #b91c1c);
+    color: #fff;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 700;
+    transition: opacity 0.2s, transform 0.1s;
+    white-space: nowrap;
+  }
+  .over35c-btn:hover { opacity: 0.9; transform: translateY(-1px); }
+  .over35c-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
   /* Modal overlay */
   .modal-overlay {
     display: none;
@@ -518,6 +533,72 @@
     margin-right: 10px;
   }
 
+  /* Over 3.5 Cards result cards */
+  .o35c-card {
+    background: #1a2a3a;
+    border: 1px solid #1e3a50;
+    border-left: 3px solid #dc2626;
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin-bottom: 12px;
+  }
+  .o35c-card:last-child { margin-bottom: 0; }
+  .o35c-rank {
+    display: inline-block;
+    background: #dc2626;
+    color: #fff;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 24px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    margin-right: 10px;
+  }
+  .tier-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 10px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+  .tier-elite { background: #22c55e22; color: #22c55e; border: 1px solid #22c55e44; }
+  .tier-strong { background: #eab30822; color: #eab308; border: 1px solid #eab30844; }
+  .tier-moderate { background: #3b82f622; color: #5ba3d9; border: 1px solid #3b82f644; }
+  .o35c-detail-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 16px;
+    font-size: 0.78rem;
+    color: #8899aa;
+    margin-top: 8px;
+  }
+  .o35c-detail-grid span { color: #e0e6ed; font-weight: 600; }
+  .o35c-ref-row {
+    font-size: 0.8rem;
+    color: #8899aa;
+    margin: 6px 0 4px;
+  }
+  .o35c-ref-row span { color: #e0e6ed; font-weight: 600; }
+  .derby-tag {
+    display: inline-block;
+    background: #dc262622;
+    color: #dc2626;
+    border: 1px solid #dc262644;
+    font-size: 0.65rem;
+    font-weight: 700;
+    padding: 1px 8px;
+    border-radius: 8px;
+    margin-left: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
   @media (max-width: 600px) {
     .header { padding: 16px; }
     .match-grid { grid-template-columns: 1fr; }
@@ -556,6 +637,9 @@
     <button class="over15fh-btn" id="over15fhBtn" onclick="triggerOver15FH()">
       Today's Top Over 1.5 FH Goals Picks
     </button>
+    <button class="over35c-btn" id="over35cBtn" onclick="triggerOver35Cards()">
+      High Probability Over 3.5 Cards
+    </button>
     {% endif %}
   </div>
 </div>
@@ -592,6 +676,18 @@
       <button class="modal-close" onclick="closeOver15fhModal()">&times;</button>
     </div>
     <div class="modal-body" id="over15fhBody">
+    </div>
+  </div>
+</div>
+
+<!-- Over 3.5 Cards Modal -->
+<div class="modal-overlay" id="over35cModal">
+  <div class="modal" style="max-width:720px">
+    <div class="modal-header">
+      <h2 style="color:#dc2626">High Probability Over 3.5 Cards &ndash; Next 48 Hours</h2>
+      <button class="modal-close" onclick="closeOver35cModal()">&times;</button>
+    </div>
+    <div class="modal-body" id="over35cBody">
     </div>
   </div>
 </div>
@@ -1026,6 +1122,96 @@ function closeOver15fhModal() {
 
 document.getElementById('over15fhModal').addEventListener('click', function(e) {
   if (e.target === this) closeOver15fhModal();
+});
+
+// Over 3.5 Cards feature
+function triggerOver35Cards() {
+  var btn = document.getElementById('over35cBtn');
+  btn.disabled = true;
+
+  var modal = document.getElementById('over35cModal');
+  var body = document.getElementById('over35cBody');
+  modal.classList.add('active');
+  body.innerHTML = '<div class="modal-loading"><div class="spinner"></div>' +
+    '<p>Running probabilistic card model across all fixtures...</p>' +
+    '<p style="font-size:0.75rem;color:#556677;margin-top:8px;">Poisson / Negative Binomial analysis with referee &amp; aggression weighting</p></div>';
+
+  fetch('/api/over35cards', { method: 'POST' })
+    .then(function() { pollOver35Cards(); })
+    .catch(function() {
+      body.innerHTML = '<div class="o25-empty">Request failed. Please try again.</div>';
+      btn.disabled = false;
+    });
+}
+
+function pollOver35Cards() {
+  var poll = setInterval(function() {
+    fetch('/api/over35cards-status')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.status === 'done') {
+          clearInterval(poll);
+          document.getElementById('over35cBtn').disabled = false;
+          renderOver35Cards(data.results, data.error);
+          var badge = document.querySelector('.badge-credits');
+          if (badge) badge.textContent = data.api_credits_used + ' API credits';
+        }
+      });
+  }, 2000);
+}
+
+function renderOver35Cards(results, error) {
+  var body = document.getElementById('over35cBody');
+  if (error) {
+    body.innerHTML = '<div class="o25-empty">Error: ' + error + '</div>';
+    return;
+  }
+  if (!results || results.length === 0) {
+    body.innerHTML = '<div class="o25-empty">No matches above 60% threshold for Over 3.5 Cards.</div>';
+    return;
+  }
+
+  var html = '';
+  for (var i = 0; i < results.length; i++) {
+    var r = results[i];
+    var probColor = r.probability >= 82 ? '#22c55e' : (r.probability >= 70 ? '#eab308' : '#5ba3d9');
+    var tierClass = r.confidence_tier === 'Elite' ? 'tier-elite' : (r.confidence_tier === 'Strong' ? 'tier-strong' : 'tier-moderate');
+    var refDisplay = r.referee_name || 'Unknown';
+    var refAvgDisplay = r.referee_avg_cards !== null ? r.referee_avg_cards + ' cards/game' : 'N/A';
+    var derbyTag = r.derby ? '<span class="derby-tag">Derby</span>' : '';
+
+    html += '<div class="o35c-card">' +
+      '<div style="margin-bottom:6px;">' +
+        '<span class="o35c-rank">' + (i + 1) + '</span>' +
+        '<span class="o25-teams">' + r.home_name + ' vs ' + r.away_name + '</span>' +
+        derbyTag +
+      '</div>' +
+      '<div class="o25-meta">' + r.league + ' &middot; ' + r.kick_off + '</div>' +
+      '<div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;">' +
+        '<div class="o25-prob" style="color:' + probColor + ';margin-bottom:0">' + r.probability + '%</div>' +
+        '<span class="tier-badge ' + tierClass + '">' + r.confidence_tier + '</span>' +
+      '</div>' +
+      '<div class="o35c-ref-row">Referee: <span>' + refDisplay + '</span> &middot; Avg: <span>' + refAvgDisplay + '</span></div>' +
+      '<div class="o35c-detail-grid">' +
+        '<div>Aggression Score: <span>' + r.combined_aggression + '</span></div>' +
+        '<div>Projected Cards: <span>' + r.projected_cards + '</span></div>' +
+        '<div>' + r.home_name + ' cards/game: <span>' + r.home_avg_match_cards + '</span></div>' +
+        '<div>' + r.away_name + ' cards/game: <span>' + r.away_avg_match_cards + '</span></div>' +
+        '<div>' + r.home_name + ' fouls/game: <span>' + r.home_fouls_avg + '</span></div>' +
+        '<div>' + r.away_name + ' fouls/game: <span>' + r.away_fouls_avg + '</span></div>' +
+        '<div style="color:#556677;font-size:0.7rem">Model: ' + r.model_type + '</div>' +
+      '</div>' +
+    '</div>';
+  }
+  body.innerHTML = html;
+}
+
+function closeOver35cModal() {
+  document.getElementById('over35cModal').classList.remove('active');
+}
+
+document.getElementById('over35cModal').addEventListener('click', function(e) {
+  if (e.target === this) closeOver35cModal();
 });
 
 {% if refreshing %}

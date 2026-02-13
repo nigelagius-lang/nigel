@@ -114,6 +114,46 @@ def fetch_league_matches(season_id: int) -> list[dict]:
     return data
 
 
+_league_referees_cache: dict[int, list[dict]] = {}
+
+def fetch_league_referees(season_id: int) -> list[dict]:
+    """Fetch all referees for a league season (cached)."""
+    if season_id in _league_referees_cache:
+        return _league_referees_cache[season_id]
+    try:
+        data = api_get("league-referees", {"season_id": season_id})
+        if not isinstance(data, list):
+            data = []
+    except Exception:
+        data = []
+    _league_referees_cache[season_id] = data
+    return data
+
+
+_referee_cache: dict[int, dict] = {}
+
+def fetch_referee(referee_id: int) -> dict:
+    """Fetch individual referee stats via /referee endpoint (cached).
+
+    The response includes at least ``id`` and ``full_name``.
+    May also include card/foul averages depending on the API tier.
+    """
+    if referee_id in _referee_cache:
+        return _referee_cache[referee_id]
+    try:
+        data = api_get("referee", {"referee_id": referee_id})
+        result: dict = {}
+        if isinstance(data, list) and data:
+            result = data[0]
+        elif isinstance(data, dict):
+            result = data
+        _referee_cache[referee_id] = result
+        return result
+    except Exception:
+        _referee_cache[referee_id] = {}
+        return {}
+
+
 _league_players_cache: dict[int, list[dict]] = {}
 
 def fetch_league_players(season_id: int) -> list[dict]:

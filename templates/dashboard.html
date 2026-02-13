@@ -570,6 +570,16 @@
   .tier-elite { background: #22c55e22; color: #22c55e; border: 1px solid #22c55e44; }
   .tier-strong { background: #eab30822; color: #eab308; border: 1px solid #eab30844; }
   .tier-moderate { background: #3b82f622; color: #5ba3d9; border: 1px solid #3b82f644; }
+  .tier-lowdata { background: #55667722; color: #556677; border: 1px solid #55667744; }
+  .data-warning {
+    font-size: 0.7rem;
+    color: #eab308;
+    margin-top: 6px;
+    padding: 4px 8px;
+    background: #eab30811;
+    border: 1px solid #eab30833;
+    border-radius: 4px;
+  }
   .o35c-detail-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -1175,10 +1185,21 @@ function renderOver35Cards(results, error) {
   for (var i = 0; i < results.length; i++) {
     var r = results[i];
     var probColor = r.probability >= 82 ? '#22c55e' : (r.probability >= 70 ? '#eab308' : '#5ba3d9');
-    var tierClass = r.confidence_tier === 'Elite' ? 'tier-elite' : (r.confidence_tier === 'Strong' ? 'tier-strong' : 'tier-moderate');
-    var refDisplay = r.referee_name || 'Unknown';
-    var refAvgDisplay = r.referee_avg_cards !== null ? r.referee_avg_cards + ' cards/game' : 'N/A';
+    var tierMap = {'Elite':'tier-elite','Strong':'tier-strong','Moderate':'tier-moderate','Low Data':'tier-lowdata'};
+    var tierClass = tierMap[r.confidence_tier] || 'tier-moderate';
+    var refDisplay = r.referee_name && r.referee_name !== 'Not Available' ? r.referee_name : '<span style="color:#ef4444">Not Available</span>';
+    var refAvgDisplay = r.referee_avg_cards !== null
+      ? r.referee_avg_cards + ' cards/game' + (r.referee_matches ? ' (' + r.referee_matches + ' matches)' : '')
+      : '<span style="color:#556677">N/A</span>';
     var derbyTag = r.derby ? '<span class="derby-tag">Derby</span>' : '';
+
+    // Data quality warning
+    var dataWarning = '';
+    if (r.data_quality === 'partial') {
+      dataWarning = '<div class="data-warning">Partial data: one team has &lt; 3 matches — league averages used as fallback</div>';
+    } else if (r.data_quality === 'low') {
+      dataWarning = '<div class="data-warning">Low data: both teams have &lt; 3 matches — league averages used</div>';
+    }
 
     html += '<div class="o35c-card">' +
       '<div style="margin-bottom:6px;">' +
@@ -1194,13 +1215,14 @@ function renderOver35Cards(results, error) {
       '<div class="o35c-ref-row">Referee: <span>' + refDisplay + '</span> &middot; Avg: <span>' + refAvgDisplay + '</span></div>' +
       '<div class="o35c-detail-grid">' +
         '<div>Aggression Score: <span>' + r.combined_aggression + '</span></div>' +
-        '<div>Projected Cards: <span>' + r.projected_cards + '</span></div>' +
-        '<div>' + r.home_name + ' cards/game: <span>' + r.home_avg_match_cards + '</span></div>' +
-        '<div>' + r.away_name + ' cards/game: <span>' + r.away_avg_match_cards + '</span></div>' +
+        '<div>Projected Cards (λ): <span>' + r.projected_cards + '</span></div>' +
+        '<div>' + r.home_name + ' cards/game: <span>' + r.home_avg_match_cards + '</span> <span style="color:#556677;font-size:0.7rem">(' + r.home_data_games + ' games)</span></div>' +
+        '<div>' + r.away_name + ' cards/game: <span>' + r.away_avg_match_cards + '</span> <span style="color:#556677;font-size:0.7rem">(' + r.away_data_games + ' games)</span></div>' +
         '<div>' + r.home_name + ' fouls/game: <span>' + r.home_fouls_avg + '</span></div>' +
         '<div>' + r.away_name + ' fouls/game: <span>' + r.away_fouls_avg + '</span></div>' +
         '<div style="color:#556677;font-size:0.7rem">Model: ' + r.model_type + '</div>' +
       '</div>' +
+      dataWarning +
     '</div>';
   }
   body.innerHTML = html;

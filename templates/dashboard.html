@@ -342,6 +342,21 @@
   .over10c-btn:hover { opacity: 0.9; transform: translateY(-1px); }
   .over10c-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
+  .over15fh-btn {
+    background: linear-gradient(135deg, #06b6d4, #0891b2);
+    color: #fff;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 700;
+    transition: opacity 0.2s, transform 0.1s;
+    white-space: nowrap;
+  }
+  .over15fh-btn:hover { opacity: 0.9; transform: translateY(-1px); }
+  .over15fh-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
   /* Modal overlay */
   .modal-overlay {
     display: none;
@@ -479,6 +494,30 @@
     margin-right: 10px;
   }
 
+  /* Over 1.5 FH Goals result cards */
+  .o15fh-card {
+    background: #1a2a3a;
+    border: 1px solid #1e3a50;
+    border-left: 3px solid #06b6d4;
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin-bottom: 12px;
+  }
+  .o15fh-card:last-child { margin-bottom: 0; }
+  .o15fh-rank {
+    display: inline-block;
+    background: #06b6d4;
+    color: #fff;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 24px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    margin-right: 10px;
+  }
+
   @media (max-width: 600px) {
     .header { padding: 16px; }
     .match-grid { grid-template-columns: 1fr; }
@@ -514,6 +553,9 @@
     <button class="over10c-btn" id="over10cBtn" onclick="triggerOver10Corners()">
       Today's Top Over 10 Corners Picks
     </button>
+    <button class="over15fh-btn" id="over15fhBtn" onclick="triggerOver15FH()">
+      Today's Top Over 1.5 FH Goals Picks
+    </button>
     {% endif %}
   </div>
 </div>
@@ -538,6 +580,18 @@
       <button class="modal-close" onclick="closeOver10cModal()">&times;</button>
     </div>
     <div class="modal-body" id="over10cBody">
+    </div>
+  </div>
+</div>
+
+<!-- Over 1.5 FH Goals Modal -->
+<div class="modal-overlay" id="over15fhModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 style="color:#06b6d4">Top Over 1.5 First Half Goals Picks</h2>
+      <button class="modal-close" onclick="closeOver15fhModal()">&times;</button>
+    </div>
+    <div class="modal-body" id="over15fhBody">
     </div>
   </div>
 </div>
@@ -897,6 +951,81 @@ function closeOver10cModal() {
 
 document.getElementById('over10cModal').addEventListener('click', function(e) {
   if (e.target === this) closeOver10cModal();
+});
+
+// Over 1.5 First Half Goals feature
+function triggerOver15FH() {
+  var btn = document.getElementById('over15fhBtn');
+  btn.disabled = true;
+
+  var modal = document.getElementById('over15fhModal');
+  var body = document.getElementById('over15fhBody');
+  modal.classList.add('active');
+  body.innerHTML = '<div class="modal-loading"><div class="spinner"></div><p>Analyzing all fixtures for Over 1.5 First Half Goals...</p><p style="font-size:0.75rem;color:#556677;margin-top:8px;">This may take a minute</p></div>';
+
+  fetch('/api/over15fh', { method: 'POST' })
+    .then(function() { pollOver15FH(); })
+    .catch(function() {
+      body.innerHTML = '<div class="o25-empty">Request failed. Please try again.</div>';
+      btn.disabled = false;
+    });
+}
+
+function pollOver15FH() {
+  var poll = setInterval(function() {
+    fetch('/api/over15fh-status')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.status === 'done') {
+          clearInterval(poll);
+          document.getElementById('over15fhBtn').disabled = false;
+          renderOver15FH(data.results, data.error);
+          var badge = document.querySelector('.badge-credits');
+          if (badge) badge.textContent = data.api_credits_used + ' API credits';
+        }
+      });
+  }, 2000);
+}
+
+function renderOver15FH(results, error) {
+  var body = document.getElementById('over15fhBody');
+  if (error) {
+    body.innerHTML = '<div class="o25-empty">Error: ' + error + '</div>';
+    return;
+  }
+  if (!results || results.length === 0) {
+    body.innerHTML = '<div class="o25-empty">No fixtures with enough first-half data to analyze.</div>';
+    return;
+  }
+
+  var html = '';
+  for (var i = 0; i < results.length; i++) {
+    var r = results[i];
+    var probColor = r.probability >= 70 ? '#22c55e' : (r.probability >= 50 ? '#eab308' : '#8899aa');
+    html += '<div class="o15fh-card">' +
+      '<div style="margin-bottom:8px;">' +
+        '<span class="o15fh-rank">' + (i + 1) + '</span>' +
+        '<span class="o25-teams">' + r.home_name + ' vs ' + r.away_name + '</span>' +
+      '</div>' +
+      '<div class="o25-meta">' + r.league + ' &middot; ' + r.kick_off + '</div>' +
+      '<div class="o25-prob" style="color:' + probColor + '">' + r.probability + '% Over 1.5 FH Goals</div>' +
+      '<div class="o25-stats">' +
+        '<div>' + r.home_name + ' O1.5 FH: <span>' + r.home_over15fh_pct + '%</span> (' + r.home_matches + ' games)</div>' +
+        '<div>' + r.away_name + ' O1.5 FH: <span>' + r.away_over15fh_pct + '%</span> (' + r.away_matches + ' games)</div>' +
+        '<div>Avg FH goals: <span>' + r.home_avg_fh_total + '</span> / <span>' + r.away_avg_fh_total + '</span></div>' +
+        '<div>Combined avg FH: <span>' + r.combined_avg_fh + '</span> goals</div>' +
+      '</div>' +
+    '</div>';
+  }
+  body.innerHTML = html;
+}
+
+function closeOver15fhModal() {
+  document.getElementById('over15fhModal').classList.remove('active');
+}
+
+document.getElementById('over15fhModal').addEventListener('click', function(e) {
+  if (e.target === this) closeOver15fhModal();
 });
 
 {% if refreshing %}

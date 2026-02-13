@@ -311,10 +311,140 @@
     display: none;
   }
 
+  /* Over 2.5 button */
+  .over25-btn {
+    background: linear-gradient(135deg, #f97316, #ea580c);
+    color: #fff;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 700;
+    transition: opacity 0.2s, transform 0.1s;
+    white-space: nowrap;
+  }
+  .over25-btn:hover { opacity: 0.9; transform: translateY(-1px); }
+  .over25-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+  /* Modal overlay */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.7);
+    z-index: 500;
+    justify-content: center;
+    align-items: center;
+    padding: 20px;
+  }
+  .modal-overlay.active { display: flex; }
+
+  .modal {
+    background: #162230;
+    border: 1px solid #1e3a50;
+    border-radius: 12px;
+    max-width: 640px;
+    width: 100%;
+    max-height: 85vh;
+    overflow-y: auto;
+    box-shadow: 0 16px 48px rgba(0,0,0,0.5);
+  }
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px 24px;
+    border-bottom: 1px solid #1e3a50;
+  }
+  .modal-header h2 {
+    font-size: 1.1rem;
+    color: #f97316;
+  }
+  .modal-close {
+    background: none;
+    border: none;
+    color: #556677;
+    font-size: 1.4rem;
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
+  }
+  .modal-close:hover { color: #e0e6ed; }
+  .modal-body { padding: 20px 24px; }
+
+  .modal-loading {
+    text-align: center;
+    padding: 40px 20px;
+    color: #eab308;
+  }
+  .modal-loading .spinner {
+    width: 24px;
+    height: 24px;
+    margin: 0 auto 12px;
+    border-width: 3px;
+  }
+
+  /* Over 2.5 result cards */
+  .o25-card {
+    background: #1a2a3a;
+    border: 1px solid #1e3a50;
+    border-left: 3px solid #f97316;
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin-bottom: 12px;
+  }
+  .o25-card:last-child { margin-bottom: 0; }
+  .o25-rank {
+    display: inline-block;
+    background: #f97316;
+    color: #fff;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 24px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    margin-right: 10px;
+  }
+  .o25-teams {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #fff;
+    display: inline;
+  }
+  .o25-meta {
+    font-size: 0.8rem;
+    color: #8899aa;
+    margin: 6px 0 10px;
+  }
+  .o25-prob {
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: #22c55e;
+    margin-bottom: 6px;
+  }
+  .o25-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px 16px;
+    font-size: 0.78rem;
+    color: #8899aa;
+  }
+  .o25-stats span { color: #e0e6ed; font-weight: 600; }
+
+  .o25-empty {
+    text-align: center;
+    padding: 30px;
+    color: #556677;
+  }
+
   @media (max-width: 600px) {
     .header { padding: 16px; }
     .match-grid { grid-template-columns: 1fr; }
     .league-dropdown { max-width: 100%; }
+    .modal { max-width: 100%; }
   }
 </style>
 </head>
@@ -338,6 +468,23 @@
         Refresh Fixtures
       </button>
     </form>
+    {% if match_count > 0 %}
+    <button class="over25-btn" id="over25Btn" onclick="triggerOver25()">
+      Today's Top Over 2.5 Goals Picks
+    </button>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Over 2.5 Modal -->
+<div class="modal-overlay" id="over25Modal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Top Over 2.5 Goals Picks</h2>
+      <button class="modal-close" onclick="closeOver25Modal()">&times;</button>
+    </div>
+    <div class="modal-body" id="over25Body">
+    </div>
   </div>
 </div>
 
@@ -545,6 +692,83 @@ function pollStatus(slug, card) {
       });
   }, 3000);
 }
+
+// Over 2.5 Goals feature
+function triggerOver25() {
+  var btn = document.getElementById('over25Btn');
+  btn.disabled = true;
+
+  var modal = document.getElementById('over25Modal');
+  var body = document.getElementById('over25Body');
+  modal.classList.add('active');
+  body.innerHTML = '<div class="modal-loading"><div class="spinner"></div><p>Analyzing all fixtures for Over 2.5 Goals...</p><p style="font-size:0.75rem;color:#556677;margin-top:8px;">This may take a minute</p></div>';
+
+  fetch('/api/over25', { method: 'POST' })
+    .then(function() { pollOver25(); })
+    .catch(function() {
+      body.innerHTML = '<div class="o25-empty">Request failed. Please try again.</div>';
+      btn.disabled = false;
+    });
+}
+
+function pollOver25() {
+  var poll = setInterval(function() {
+    fetch('/api/over25-status')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.status === 'done') {
+          clearInterval(poll);
+          document.getElementById('over25Btn').disabled = false;
+          renderOver25(data.results, data.error);
+          // Update credits badge
+          var badge = document.querySelector('.badge-credits');
+          if (badge) badge.textContent = data.api_credits_used + ' API credits';
+        }
+      });
+  }, 2000);
+}
+
+function renderOver25(results, error) {
+  var body = document.getElementById('over25Body');
+  if (error) {
+    body.innerHTML = '<div class="o25-empty">Error: ' + error + '</div>';
+    return;
+  }
+  if (!results || results.length === 0) {
+    body.innerHTML = '<div class="o25-empty">No fixtures with enough data to analyze.</div>';
+    return;
+  }
+
+  var html = '';
+  for (var i = 0; i < results.length; i++) {
+    var r = results[i];
+    var probColor = r.probability >= 70 ? '#22c55e' : (r.probability >= 50 ? '#eab308' : '#8899aa');
+    html += '<div class="o25-card">' +
+      '<div style="margin-bottom:8px;">' +
+        '<span class="o25-rank">' + (i + 1) + '</span>' +
+        '<span class="o25-teams">' + r.home_name + ' vs ' + r.away_name + '</span>' +
+      '</div>' +
+      '<div class="o25-meta">' + r.league + ' &middot; ' + r.kick_off + '</div>' +
+      '<div class="o25-prob" style="color:' + probColor + '">' + r.probability + '% Over 2.5</div>' +
+      '<div class="o25-stats">' +
+        '<div>' + r.home_name + ' O2.5: <span>' + r.home_over25_pct + '%</span> (' + r.home_matches + ' games)</div>' +
+        '<div>' + r.away_name + ' O2.5: <span>' + r.away_over25_pct + '%</span> (' + r.away_matches + ' games)</div>' +
+        '<div>Avg scored: <span>' + r.home_avg_scored + '</span> / <span>' + r.away_avg_scored + '</span></div>' +
+        '<div>Avg conceded: <span>' + r.home_avg_conceded + '</span> / <span>' + r.away_avg_conceded + '</span></div>' +
+      '</div>' +
+    '</div>';
+  }
+  body.innerHTML = html;
+}
+
+function closeOver25Modal() {
+  document.getElementById('over25Modal').classList.remove('active');
+}
+
+// Close modal on overlay click
+document.getElementById('over25Modal').addEventListener('click', function(e) {
+  if (e.target === this) closeOver25Modal();
+});
 
 {% if refreshing %}
 setTimeout(() => location.reload(), 5000);

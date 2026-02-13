@@ -169,6 +169,9 @@ _state = {
     "last_refresh": None,  # datetime of last fixture list refresh
     "refreshing": False,
     "analyzing": set(),    # slugs currently being analyzed
+    "over25_status": "idle",  # idle | running | done
+    "over25_results": [],     # list of top picks
+    "over25_error": None,
 }
 
 
@@ -402,6 +405,164 @@ def api_status():
             "analyzed_count": len(_state["reports"]),
             "last_refresh": _state["last_refresh"].isoformat() if _state["last_refresh"] else None,
             "refreshing": _state["refreshing"],
+            "api_credits_used": fa.api_credits_used,
+        })
+
+
+# ---------------------------------------------------------------------------
+# Over 2.5 Goals analysis
+# ---------------------------------------------------------------------------
+
+def _run_over25():
+    """Analyze all fixtures for Over 2.5 Goals probability."""
+    with _lock:
+        if _state["over25_status"] == "running":
+            return
+        _state["over25_status"] = "running"
+        _state["over25_error"] = None
+        fixtures = list(_state["fixtures"])
+
+    try:
+        results = []
+        for fix in fixtures:
+            home_name = fix.get("home_name", "Home")
+            away_name = fix.get("away_name", "Away")
+            home_id = int(fix.get("homeID", fix.get("home_id", 0)))
+            away_id = int(fix.get("awayID", fix.get("away_id", 0)))
+            league = fix.get("league_name", fix.get("competition_name", "Unknown"))
+            ko_unix = fix.get("date_unix", 0)
+            ko_str = (
+                datetime.fromtimestamp(int(ko_unix), tz=timezone.utc).strftime("%H:%M UTC")
+                if ko_unix else "TBD"
+            )
+
+            if not home_id or not away_id:
+                continue
+
+            # Get season_id for league-matches lookup
+            season_id = None
+            for key in ("competition_id", "season_id", "league_id", "season"):
+                val = fix.get(key)
+                if val is not None:
+                    try:
+                        season_id = int(val)
+                        if season_id > 0:
+                            break
+                    except (ValueError, TypeError):
+                        continue
+
+            # Fetch last 10 matches for each team
+            home_last10 = fa.get_team_last10(home_id, season_id)
+            away_last10 = fa.get_team_last10(away_id, season_id)
+
+            if not home_last10 and not away_last10:
+                continue
+
+            # Calculate Over 2.5 stats for home team
+            home_over25 = 0
+            home_total_goals = []
+            for m in home_last10:
+                tg = m.get("total_goals", -1)
+                if tg >= 0:
+                    home_total_goals.append(tg)
+                    if tg > 2:
+                        home_over25 += 1
+            home_matches = len(home_total_goals)
+            home_pct = (home_over25 / home_matches * 100) if home_matches > 0 else 0
+            home_avg_scored = 0.0
+            home_avg_conceded = 0.0
+            if home_last10:
+                scored = [m.get("goals_scored", 0) for m in home_last10 if m.get("goals_scored", -1) >= 0]
+                conceded = [m.get("goals_conceded", 0) for m in home_last10 if m.get("goals_conceded", -1) >= 0]
+                home_avg_scored = sum(scored) / len(scored) if scored else 0
+                home_avg_conceded = sum(conceded) / len(conceded) if conceded else 0
+
+            # Calculate Over 2.5 stats for away team
+            away_over25 = 0
+            away_total_goals = []
+            for m in away_last10:
+                tg = m.get("total_goals", -1)
+                if tg >= 0:
+                    away_total_goals.append(tg)
+                    if tg > 2:
+                        away_over25 += 1
+            away_matches = len(away_total_goals)
+            away_pct = (away_over25 / away_matches * 100) if away_matches > 0 else 0
+            away_avg_scored = 0.0
+            away_avg_conceded = 0.0
+            if away_last10:
+                scored = [m.get("goals_scored", 0) for m in away_last10 if m.get("goals_scored", -1) >= 0]
+                conceded = [m.get("goals_conceded", 0) for m in away_last10 if m.get("goals_conceded", -1) >= 0]
+                away_avg_scored = sum(scored) / len(scored) if scored else 0
+                away_avg_conceded = sum(conceded) / len(conceded) if conceded else 0
+
+            # Combined probability: weighted average of both teams' O2.5 rates
+            # Also factor in expected goals (home attack + away attack vs defenses)
+            if home_matches > 0 and away_matches > 0:
+                combined_pct = (home_pct + away_pct) / 2
+            elif home_matches > 0:
+                combined_pct = home_pct
+            elif away_matches > 0:
+                combined_pct = away_pct
+            else:
+                continue
+
+            expected_goals = home_avg_scored + away_avg_scored
+
+            results.append({
+                "home_name": home_name,
+                "away_name": away_name,
+                "league": league,
+                "kick_off": ko_str,
+                "kick_off_unix": int(ko_unix) if ko_unix else 0,
+                "probability": round(combined_pct, 1),
+                "home_over25_pct": round(home_pct, 1),
+                "away_over25_pct": round(away_pct, 1),
+                "home_avg_scored": round(home_avg_scored, 2),
+                "home_avg_conceded": round(home_avg_conceded, 2),
+                "away_avg_scored": round(away_avg_scored, 2),
+                "away_avg_conceded": round(away_avg_conceded, 2),
+                "expected_goals": round(expected_goals, 2),
+                "home_matches": home_matches,
+                "away_matches": away_matches,
+            })
+
+        # Sort by probability descending, take top 4
+        results.sort(key=lambda r: r["probability"], reverse=True)
+        top4 = results[:4]
+
+        with _lock:
+            _state["over25_results"] = top4
+            _state["over25_status"] = "done"
+
+    except Exception as e:
+        with _lock:
+            _state["over25_status"] = "done"
+            _state["over25_error"] = str(e)
+
+
+@app.route("/api/over25", methods=["POST"])
+def trigger_over25():
+    """Trigger Over 2.5 Goals analysis for all fixtures."""
+    with _lock:
+        if _state["over25_status"] == "running":
+            return jsonify({"status": "running"}), 202
+        if not _state["fixtures"]:
+            return jsonify({"error": "No fixtures loaded. Refresh first."}), 400
+
+    t = threading.Thread(target=_run_over25, daemon=True)
+    t.start()
+    return jsonify({"status": "running"}), 202
+
+
+@app.route("/api/over25-status")
+def over25_status():
+    """Poll Over 2.5 analysis status and results."""
+    with _lock:
+        return jsonify({
+            "status": _state["over25_status"],
+            "results": _state["over25_results"],
+            "error": _state["over25_error"],
             "api_credits_used": fa.api_credits_used,
         })
 

@@ -29,6 +29,22 @@
     gap: 16px;
     font-size: 0.85rem;
     color: #8899aa;
+    flex-wrap: wrap;
+  }
+
+  /* Action buttons grid — max 3 per row */
+  .action-buttons {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    width: 100%;
+    margin-top: 12px;
+  }
+  @media (max-width: 900px) {
+    .action-buttons { grid-template-columns: repeat(2, 1fr); }
+  }
+  @media (max-width: 520px) {
+    .action-buttons { grid-template-columns: 1fr; }
   }
   .badge {
     display: inline-block;
@@ -309,6 +325,12 @@
     padding: 40px 20px;
     color: #556677;
     display: none;
+  }
+
+  /* Action button shared styles */
+  .action-buttons button {
+    width: 100%;
+    text-align: center;
   }
 
   /* Over 2.5 button */
@@ -787,7 +809,9 @@
         Refresh Fixtures
       </button>
     </form>
-    {% if match_count > 0 %}
+  </div>
+  {% if match_count > 0 %}
+  <div class="action-buttons">
     <button class="over25-btn" id="over25Btn" onclick="triggerOver25()">
       Today's Top Over 2.5 Goals Picks
     </button>
@@ -806,8 +830,8 @@
     <button class="corner-overs-btn" id="cornerOversBtn" onclick="triggerCornerOvers()">
       Top 5 Corner Over Opportunities
     </button>
-    {% endif %}
   </div>
+  {% endif %}
 </div>
 
 <!-- Over 2.5 Modal -->
@@ -925,7 +949,7 @@
       {% for league_name, cards in leagues.items() %}
         <div class="league-section" data-league="{{ league_name }}" data-country="{{ league_country.get(league_name, 'Other') }}">
           <div class="league-header" onclick="toggleLeague(this)">
-            <h2>{{ league_name }}</h2>
+            <h2>{{ league_country.get(league_name, 'Other')|upper }} &ndash; {{ league_name|upper }}</h2>
             <div style="display:flex; align-items:center; gap:12px;">
               <span class="league-count">{{ cards|length }} match{{ 'es' if cards|length != 1 }}</span>
               <span class="toggle-icon">&#9660;</span>

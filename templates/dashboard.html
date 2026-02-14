@@ -624,6 +624,141 @@
     letter-spacing: 0.5px;
   }
 
+  /* Shot Over Opportunities button & cards */
+  .shot-overs-btn {
+    background: linear-gradient(135deg, #16a34a, #15803d);
+    color: #fff;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 700;
+    transition: opacity 0.2s, transform 0.1s;
+    white-space: nowrap;
+  }
+  .shot-overs-btn:hover { opacity: 0.9; transform: translateY(-1px); }
+  .shot-overs-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+  .so-card {
+    background: #1a2a3a;
+    border: 1px solid #1e3a50;
+    border-left: 3px solid #16a34a;
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin-bottom: 12px;
+  }
+  .so-card:last-child { margin-bottom: 0; }
+  .so-rank {
+    display: inline-block;
+    background: #16a34a;
+    color: #fff;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 24px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    margin-right: 10px;
+  }
+  .so-detail-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 16px;
+    font-size: 0.78rem;
+    color: #8899aa;
+    margin-top: 8px;
+  }
+  .so-detail-grid span { color: #e0e6ed; font-weight: 600; }
+  .ev-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 10px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+  .ev-green { background: #22c55e22; color: #22c55e; border: 1px solid #22c55e44; }
+  .ev-light { background: #86efac22; color: #86efac; border: 1px solid #86efac44; }
+  .pace-tag {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 8px;
+    font-size: 0.65rem;
+    font-weight: 700;
+    margin-left: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .pace-high { background: #22c55e22; color: #22c55e; border: 1px solid #22c55e44; }
+  .pace-medium { background: #eab30822; color: #eab308; border: 1px solid #eab30844; }
+  .pace-low { background: #55667722; color: #556677; border: 1px solid #55667744; }
+
+  /* Corner Over Opportunities button & cards */
+  .corner-overs-btn {
+    background: linear-gradient(135deg, #d97706, #b45309);
+    color: #fff;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 700;
+    transition: opacity 0.2s, transform 0.1s;
+    white-space: nowrap;
+  }
+  .corner-overs-btn:hover { opacity: 0.9; transform: translateY(-1px); }
+  .corner-overs-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+  .co-card {
+    background: #1a2a3a;
+    border: 1px solid #1e3a50;
+    border-left: 3px solid #d97706;
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin-bottom: 12px;
+  }
+  .co-card:last-child { margin-bottom: 0; }
+  .co-rank {
+    display: inline-block;
+    background: #d97706;
+    color: #fff;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 24px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    margin-right: 10px;
+  }
+  .co-detail-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 16px;
+    font-size: 0.78rem;
+    color: #8899aa;
+    margin-top: 8px;
+  }
+  .co-detail-grid span { color: #e0e6ed; font-weight: 600; }
+  .potential-tag {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 8px;
+    font-size: 0.65rem;
+    font-weight: 700;
+    margin-left: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .potential-high { background: #22c55e22; color: #22c55e; border: 1px solid #22c55e44; }
+  .potential-medium { background: #eab30822; color: #eab308; border: 1px solid #eab30844; }
+  .potential-low { background: #55667722; color: #556677; border: 1px solid #55667744; }
+
   @media (max-width: 600px) {
     .header { padding: 16px; }
     .match-grid { grid-template-columns: 1fr; }
@@ -664,6 +799,12 @@
     </button>
     <button class="over35c-btn" id="over35cBtn" onclick="triggerOver35Cards()">
       High Probability Over 3.5 Cards
+    </button>
+    <button class="shot-overs-btn" id="shotOversBtn" onclick="triggerShotOvers()">
+      Top 5 Shot Over Opportunities
+    </button>
+    <button class="corner-overs-btn" id="cornerOversBtn" onclick="triggerCornerOvers()">
+      Top 5 Corner Over Opportunities
     </button>
     {% endif %}
   </div>
@@ -713,6 +854,30 @@
       <button class="modal-close" onclick="closeOver35cModal()">&times;</button>
     </div>
     <div class="modal-body" id="over35cBody">
+    </div>
+  </div>
+</div>
+
+<!-- Shot Over Opportunities Modal -->
+<div class="modal-overlay" id="shotOversModal">
+  <div class="modal" style="max-width:780px">
+    <div class="modal-header">
+      <h2 style="color:#16a34a">Top 5 Shot Over Opportunities</h2>
+      <button class="modal-close" onclick="closeShotOversModal()">&times;</button>
+    </div>
+    <div class="modal-body" id="shotOversBody">
+    </div>
+  </div>
+</div>
+
+<!-- Corner Over Opportunities Modal -->
+<div class="modal-overlay" id="cornerOversModal">
+  <div class="modal" style="max-width:780px">
+    <div class="modal-header">
+      <h2 style="color:#d97706">Top 5 Corner Over Opportunities</h2>
+      <button class="modal-close" onclick="closeCornerOversModal()">&times;</button>
+    </div>
+    <div class="modal-body" id="cornerOversBody">
     </div>
   </div>
 </div>
@@ -1259,6 +1424,222 @@ function closeOver35cModal() {
 
 document.getElementById('over35cModal').addEventListener('click', function(e) {
   if (e.target === this) closeOver35cModal();
+});
+
+// Shot Over Opportunities feature
+function triggerShotOvers() {
+  var btn = document.getElementById('shotOversBtn');
+  btn.disabled = true;
+
+  var modal = document.getElementById('shotOversModal');
+  var body = document.getElementById('shotOversBody');
+  modal.classList.add('active');
+  body.innerHTML = '<div class="modal-loading"><div class="spinner"></div>' +
+    '<p>Analysing shot data across Premier League, La Liga, Serie A, Bundesliga, Ligue 1, UCL &amp; UEL...</p>' +
+    '<p style="font-size:0.75rem;color:#556677;margin-top:8px;">NegBin/Poisson modelling with league normalization</p></div>';
+
+  fetch('/api/shot-overs', { method: 'POST' })
+    .then(function() { pollShotOvers(); })
+    .catch(function() {
+      body.innerHTML = '<div class="o25-empty">Request failed. Please try again.</div>';
+      btn.disabled = false;
+    });
+}
+
+function pollShotOvers() {
+  var poll = setInterval(function() {
+    fetch('/api/shot-overs-status')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.status === 'done') {
+          clearInterval(poll);
+          document.getElementById('shotOversBtn').disabled = false;
+          renderShotOvers(data.results, data.error);
+          var badge = document.querySelector('.badge-credits');
+          if (badge) badge.textContent = data.api_credits_used + ' API credits';
+        }
+      });
+  }, 2000);
+}
+
+function renderShotOvers(results, error) {
+  var body = document.getElementById('shotOversBody');
+  if (error) {
+    body.innerHTML = '<div class="o25-empty">Error: ' + error + '</div>';
+    return;
+  }
+  if (!results || results.length === 0) {
+    body.innerHTML = '<div class="o25-empty">No strong shot over opportunities found.</div>';
+    return;
+  }
+
+  var html = '';
+  for (var i = 0; i < results.length; i++) {
+    var r = results[i];
+
+    // EV color: green > 5%, light green 3-5%
+    var evColor = r.ev_pct > 5 ? '#22c55e' : '#86efac';
+    var evClass = r.ev_pct > 5 ? 'ev-green' : 'ev-light';
+    var evDisplay = r.has_bk_odds ? r.ev_pct + '%' : 'N/A';
+
+    // Pace tag
+    var paceClass = r.shot_pace === 'High' ? 'pace-high' : (r.shot_pace === 'Medium' ? 'pace-medium' : 'pace-low');
+
+    // Style tag
+    var styleColor = r.style_matchup === 'Aggressive' ? '#22c55e' : (r.style_matchup === 'Balanced' ? '#eab308' : '#556677');
+
+    // Prob color
+    var probColor = r.model_prob >= 70 ? '#22c55e' : (r.model_prob >= 60 ? '#86efac' : '#eab308');
+
+    html += '<div class="so-card">' +
+      '<div style="margin-bottom:6px;">' +
+        '<span class="so-rank">' + (i + 1) + '</span>' +
+        '<span class="o25-teams">' + r.home_name + ' vs ' + r.away_name + '</span>' +
+        '<span class="pace-tag ' + paceClass + '">' + r.shot_pace + ' Pace</span>' +
+      '</div>' +
+      '<div class="o25-meta">' + r.league + ' &middot; ' + r.kick_off + '</div>' +
+
+      '<div style="display:flex;align-items:center;gap:12px;margin:8px 0 4px;">' +
+        '<div class="o25-prob" style="color:' + probColor + ';margin-bottom:0;font-size:1.3rem;">' + r.model_prob + '% Over ' + r.line + '</div>' +
+        '<span class="ev-badge ' + evClass + '">EV: ' + evDisplay + '</span>' +
+      '</div>' +
+
+      '<div class="so-detail-grid">' +
+        '<div>Model Expected: <span>' + r.model_expected_total + '</span></div>' +
+        '<div>League Median: <span>' + r.league_median_shots + '</span></div>' +
+        '<div>Home Expected: <span>' + r.home_expected + '</span></div>' +
+        '<div>Away Expected: <span>' + r.away_expected + '</span></div>' +
+        '<div>' + r.home_name + ' avg shots: <span>' + r.home_avg_shots + '</span></div>' +
+        '<div>' + r.away_name + ' avg shots: <span>' + r.away_avg_shots + '</span></div>' +
+        '<div>Home SOT: <span>' + r.home_sot + '</span></div>' +
+        '<div>Away SOT: <span>' + r.away_sot + '</span></div>' +
+        '<div>Home Conv%: <span>' + r.home_conversion + '%</span></div>' +
+        '<div>Away Conv%: <span>' + r.away_conversion + '%</span></div>' +
+        '<div>Implied Prob: <span>' + (r.implied_prob > 0 ? r.implied_prob + '%' : 'N/A') + '</span></div>' +
+        '<div>Style: <span style="color:' + styleColor + '">' + r.style_matchup + '</span></div>' +
+      '</div>' +
+
+      '<div style="font-size:0.7rem;color:#556677;margin-top:6px;">' +
+        'P(Over ' + (r.line - 1) + '): ' + r.prob_over_minus1 + '% &middot; ' +
+        'P(Over ' + (r.line + 1) + '): ' + r.prob_over_plus1 + '% &middot; ' +
+        'Shots vs Line: ' + (r.shots_vs_line > 0 ? '+' : '') + r.shots_vs_line +
+      '</div>' +
+    '</div>';
+  }
+  body.innerHTML = html;
+}
+
+function closeShotOversModal() {
+  document.getElementById('shotOversModal').classList.remove('active');
+}
+
+document.getElementById('shotOversModal').addEventListener('click', function(e) {
+  if (e.target === this) closeShotOversModal();
+});
+
+// Corner Over Opportunities feature
+function triggerCornerOvers() {
+  var btn = document.getElementById('cornerOversBtn');
+  btn.disabled = true;
+
+  var modal = document.getElementById('cornerOversModal');
+  var body = document.getElementById('cornerOversBody');
+  modal.classList.add('active');
+  body.innerHTML = '<div class="modal-loading"><div class="spinner"></div>' +
+    '<p>Analysing corner data across all active leagues...</p>' +
+    '<p style="font-size:0.75rem;color:#556677;margin-top:8px;">NegBin/Poisson modelling with shot volume &amp; blocked shot factors</p></div>';
+
+  fetch('/api/corner-overs', { method: 'POST' })
+    .then(function() { pollCornerOvers(); })
+    .catch(function() {
+      body.innerHTML = '<div class="o25-empty">Request failed. Please try again.</div>';
+      btn.disabled = false;
+    });
+}
+
+function pollCornerOvers() {
+  var poll = setInterval(function() {
+    fetch('/api/corner-overs-status')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.status === 'done') {
+          clearInterval(poll);
+          document.getElementById('cornerOversBtn').disabled = false;
+          renderCornerOvers(data.results, data.error);
+          var badge = document.querySelector('.badge-credits');
+          if (badge) badge.textContent = data.api_credits_used + ' API credits';
+        }
+      });
+  }, 2000);
+}
+
+function renderCornerOvers(results, error) {
+  var body = document.getElementById('cornerOversBody');
+  if (error) {
+    body.innerHTML = '<div class="o25-empty">Error: ' + error + '</div>';
+    return;
+  }
+  if (!results || results.length === 0) {
+    body.innerHTML = '<div class="o25-empty">No strong corner over opportunities found.</div>';
+    return;
+  }
+
+  var html = '';
+  for (var i = 0; i < results.length; i++) {
+    var r = results[i];
+
+    var evColor = r.ev_pct > 5 ? '#22c55e' : '#86efac';
+    var evClass = r.ev_pct > 5 ? 'ev-green' : 'ev-light';
+    var evDisplay = r.has_bk_odds ? r.ev_pct + '%' : 'N/A';
+
+    var potentialClass = r.over_potential === 'High' ? 'potential-high' : (r.over_potential === 'Medium' ? 'potential-medium' : 'potential-low');
+
+    var probColor = r.model_prob >= 70 ? '#22c55e' : (r.model_prob >= 60 ? '#86efac' : '#eab308');
+
+    html += '<div class="co-card">' +
+      '<div style="margin-bottom:6px;">' +
+        '<span class="co-rank">' + (i + 1) + '</span>' +
+        '<span class="o25-teams">' + r.home_name + ' vs ' + r.away_name + '</span>' +
+        '<span class="potential-tag ' + potentialClass + '">' + r.over_potential + ' Potential</span>' +
+      '</div>' +
+      '<div class="o25-meta">' + r.league + ' &middot; ' + r.kick_off + '</div>' +
+
+      '<div style="display:flex;align-items:center;gap:12px;margin:8px 0 4px;">' +
+        '<div class="o25-prob" style="color:' + probColor + ';margin-bottom:0;font-size:1.3rem;">' + r.model_prob + '% Over ' + r.line + '</div>' +
+        '<span class="ev-badge ' + evClass + '">EV: ' + evDisplay + '</span>' +
+      '</div>' +
+
+      '<div class="co-detail-grid">' +
+        '<div>Model Expected: <span>' + r.model_expected_total + '</span></div>' +
+        '<div>League Median: <span>' + r.league_median_corners + '</span></div>' +
+        '<div>Home Expected: <span>' + r.home_expected + '</span></div>' +
+        '<div>Away Expected: <span>' + r.away_expected + '</span></div>' +
+        '<div>' + r.home_name + ' avg corners: <span>' + r.home_avg_corners + '</span></div>' +
+        '<div>' + r.away_name + ' avg corners: <span>' + r.away_avg_corners + '</span></div>' +
+        '<div>Home avg shots: <span>' + r.home_avg_shots + '</span></div>' +
+        '<div>Away avg shots: <span>' + r.away_avg_shots + '</span></div>' +
+        '<div>Home blocked: <span>' + r.home_avg_blocked + '</span></div>' +
+        '<div>Away blocked: <span>' + r.away_avg_blocked + '</span></div>' +
+        '<div>Implied Prob: <span>' + (r.implied_prob > 0 ? r.implied_prob + '%' : 'N/A') + '</span></div>' +
+        '<div>Prob Edge: <span>' + (r.prob_edge > 0 ? '+' + r.prob_edge + '%' : 'N/A') + '</span></div>' +
+      '</div>' +
+
+      '<div style="font-size:0.7rem;color:#556677;margin-top:6px;">' +
+        'P(Over ' + (r.line - 1) + '): ' + r.prob_over_minus1 + '% &middot; ' +
+        'P(Over ' + (r.line + 1) + '): ' + r.prob_over_plus1 + '% &middot; ' +
+        'Corners vs Line: ' + (r.corners_vs_line > 0 ? '+' : '') + r.corners_vs_line +
+      '</div>' +
+    '</div>';
+  }
+  body.innerHTML = html;
+}
+
+function closeCornerOversModal() {
+  document.getElementById('cornerOversModal').classList.remove('active');
+}
+
+document.getElementById('cornerOversModal').addEventListener('click', function(e) {
+  if (e.target === this) closeCornerOversModal();
 });
 
 {% if refreshing %}

@@ -6,6 +6,7 @@ Shows today's fixtures and lets you analyze individual matches on demand
 to conserve API credits.
 """
 
+import math
 import os
 import threading
 from datetime import datetime, timezone
@@ -181,6 +182,14 @@ _state = {
     "over35c_status": "idle",   # idle | running | done
     "over35c_results": [],      # list of high-prob over 3.5 cards picks
     "over35c_error": None,
+    "shot_overs_status": "idle",
+    "shot_overs_results": [],
+    "shot_overs_error": None,
+    "shot_overs_ts": 0,           # cache timestamp
+    "corner_overs_status": "idle",
+    "corner_overs_results": [],
+    "corner_overs_error": None,
+    "corner_overs_ts": 0,         # cache timestamp
 }
 
 
@@ -1275,6 +1284,861 @@ def _run_over35cards():
             _state["over35c_error"] = str(e)
 
 
+# ---------------------------------------------------------------------------
+# Shared probability helpers (Poisson / Negative Binomial)
+# ---------------------------------------------------------------------------
+
+def _poisson_cdf(lam, k):
+    """P(X <= k) for Poisson(lam)."""
+    if lam <= 0:
+        return 1.0 if k >= 0 else 0.0
+    cdf = 0.0
+    for i in range(int(k) + 1):
+        cdf += math.exp(-lam) * (lam ** i) / math.factorial(i)
+    return min(cdf, 1.0)
+
+
+def _neg_binom_cdf(mean, var, k):
+    """P(X <= k) for NegBin parameterised by mean/variance.
+    Falls back to Poisson when variance <= mean.
+    """
+    if var <= mean or mean <= 0:
+        return _poisson_cdf(mean, k)
+    p = mean / var
+    r = mean * p / (1 - p)
+    cdf = 0.0
+    for i in range(int(k) + 1):
+        log_pmf = (math.lgamma(i + r) - math.lgamma(i + 1) - math.lgamma(r)
+                   + i * math.log(1 - p) + r * math.log(p))
+        cdf += math.exp(log_pmf)
+    return min(cdf, 1.0)
+
+
+def _prob_over(mean, var, line):
+    """P(X > line).  Uses NegBin if overdispersed, else Poisson."""
+    k = int(line)  # e.g. line 24.5 → k=24
+    if var > mean * 1.3:
+        return 1.0 - _neg_binom_cdf(mean, var, k)
+    return 1.0 - _poisson_cdf(mean, k)
+
+
+# ---------------------------------------------------------------------------
+# Top 5 Shot Over Opportunities
+# ---------------------------------------------------------------------------
+
+_ALLOWED_SHOT_LEAGUES = {
+    "premier league", "ligue 1", "la liga", "serie a", "bundesliga",
+    "champions league", "europa league",
+}
+
+
+def _is_allowed_shot_league(league_name: str) -> bool:
+    """Check if fixture belongs to one of the 7 allowed shot competitions."""
+    name_lower = league_name.lower()
+    for allowed in _ALLOWED_SHOT_LEAGUES:
+        if allowed in name_lower:
+            return True
+    return False
+
+
+def _compute_league_shot_stats(season_id):
+    """Compute league-level shot statistics for normalization.
+
+    Returns dict with: median_total, mean_total, std_total,
+    median_home, median_away, match_count.
+    """
+    matches = fa.fetch_league_matches(season_id)
+    total_shots_list = []
+    home_shots_list = []
+    away_shots_list = []
+    for m in matches:
+        if m.get("status") != "complete":
+            continue
+        hs = fa.safe_int(m.get("team_a_shots", m.get("home_shots", m.get("homeShots", -1))))
+        aws = fa.safe_int(m.get("team_b_shots", m.get("away_shots", m.get("awayShots", -1))))
+        if hs < 0 or aws < 0:
+            continue
+        total_shots_list.append(hs + aws)
+        home_shots_list.append(hs)
+        away_shots_list.append(aws)
+    if not total_shots_list:
+        return {"median_total": 24.0, "mean_total": 24.0, "std_total": 6.0,
+                "median_home": 13.0, "median_away": 11.0, "match_count": 0}
+    total_shots_list.sort()
+    home_shots_list.sort()
+    away_shots_list.sort()
+    n = len(total_shots_list)
+    median_t = total_shots_list[n // 2]
+    mean_t = sum(total_shots_list) / n
+    var_t = sum((x - mean_t) ** 2 for x in total_shots_list) / max(n - 1, 1)
+    std_t = var_t ** 0.5
+    nh = len(home_shots_list)
+    na = len(away_shots_list)
+    return {
+        "median_total": median_t,
+        "mean_total": round(mean_t, 2),
+        "std_total": round(std_t, 2),
+        "median_home": home_shots_list[nh // 2],
+        "median_away": away_shots_list[na // 2],
+        "match_count": n,
+    }
+
+
+def _extract_shot_profile(last10, is_home_upcoming):
+    """Extract shot statistics from last-10 data.
+
+    Returns dict with averages (for/against, SOT, overall) plus
+    home/away split and recent-5 trend.
+    """
+    if not last10:
+        return None
+
+    shots_for_all, shots_ag_all = [], []
+    sot_for_all, sot_ag_all = [], []
+    home_shots, away_shots = [], []
+    home_shots_ag, away_shots_ag = [], []
+
+    for m in last10:
+        sf = m.get("shots", -1)
+        sa = m.get("shots_against", -1)
+        sot = m.get("sot", -1)
+        sota = m.get("sot_against", -1)
+        if sf >= 0:
+            shots_for_all.append(sf)
+            if m.get("is_home"):
+                home_shots.append(sf)
+            else:
+                away_shots.append(sf)
+        if sa >= 0:
+            shots_ag_all.append(sa)
+            if m.get("is_home"):
+                home_shots_ag.append(sa)
+            else:
+                away_shots_ag.append(sa)
+        if sot >= 0:
+            sot_for_all.append(sot)
+        if sota >= 0:
+            sot_ag_all.append(sota)
+
+    if not shots_for_all:
+        return None
+
+    avg_shots = _safe_avg(shots_for_all)
+    avg_shots_ag = _safe_avg(shots_ag_all) if shots_ag_all else avg_shots
+    avg_sot = _safe_avg(sot_for_all) if sot_for_all else 0.0
+    avg_sot_ag = _safe_avg(sot_ag_all) if sot_ag_all else 0.0
+
+    # Home/away split averages
+    if is_home_upcoming:
+        venue_shots = _safe_avg(home_shots) if home_shots else avg_shots
+        venue_shots_ag = _safe_avg(home_shots_ag) if home_shots_ag else avg_shots_ag
+    else:
+        venue_shots = _safe_avg(away_shots) if away_shots else avg_shots
+        venue_shots_ag = _safe_avg(away_shots_ag) if away_shots_ag else avg_shots_ag
+
+    # Recent 5-match trend
+    recent5 = shots_for_all[:5] if len(shots_for_all) >= 5 else shots_for_all
+    trend_avg = _safe_avg(recent5)
+
+    # Shot conversion rate
+    conversion = (avg_sot / avg_shots * 100) if avg_shots > 0 else 0.0
+
+    return {
+        "avg_shots": round(avg_shots, 2),
+        "avg_shots_against": round(avg_shots_ag, 2),
+        "avg_sot": round(avg_sot, 2),
+        "avg_sot_against": round(avg_sot_ag, 2),
+        "venue_shots": round(venue_shots, 2),
+        "venue_shots_against": round(venue_shots_ag, 2),
+        "recent5_avg": round(trend_avg, 2),
+        "conversion_pct": round(conversion, 1),
+        "match_count": len(shots_for_all),
+    }
+
+
+def _run_shot_overs():
+    """Analyse fixtures in 7 allowed competitions for Shot Over opportunities.
+
+    Model:
+      1. Compute expected shots per team (home/away split + opponent conceding).
+      2. Apply adjustments: recent trend, league normalization, 1X2-implied dominance.
+      3. Use Negative Binomial / Poisson to compute P(total > line).
+      4. Compute EV from bookmaker odds if available.
+      5. Rank by EV / probability edge, return top 5.
+    """
+    with _lock:
+        if _state["shot_overs_status"] == "running":
+            return
+        # 5-minute cache
+        now_ts_cache = int(datetime.now(timezone.utc).timestamp())
+        if (_state["shot_overs_status"] == "done"
+                and now_ts_cache - _state["shot_overs_ts"] < 300
+                and _state["shot_overs_results"]):
+            return
+        _state["shot_overs_status"] = "running"
+        _state["shot_overs_error"] = None
+        fixtures = list(_state["fixtures"])
+
+    try:
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        cutoff_ts = now_ts + 48 * 3600
+
+        league_shot_cache: dict[int, dict] = {}
+        results = []
+
+        for fix in fixtures:
+            ko_unix = int(fix.get("date_unix", 0) or 0)
+            if ko_unix and (ko_unix < now_ts - 3600 or ko_unix > cutoff_ts):
+                continue
+            # Skip postponed
+            status = (fix.get("status") or "").lower()
+            if status in ("postponed", "cancelled", "suspended"):
+                continue
+
+            league = fix.get("league_name", fix.get("competition_name", "Unknown"))
+            if not _is_allowed_shot_league(league):
+                continue
+
+            home_name = fix.get("home_name", "Home")
+            away_name = fix.get("away_name", "Away")
+            home_id = int(fix.get("homeID", fix.get("home_id", 0)))
+            away_id = int(fix.get("awayID", fix.get("away_id", 0)))
+            ko_str = (
+                datetime.fromtimestamp(ko_unix, tz=timezone.utc).strftime("%H:%M UTC")
+                if ko_unix else "TBD"
+            )
+
+            if not home_id or not away_id:
+                continue
+
+            # Season ID
+            season_id = None
+            for key in ("competition_id", "season_id", "league_id", "season"):
+                val = fix.get(key)
+                if val is not None:
+                    try:
+                        season_id = int(val)
+                        if season_id > 0:
+                            break
+                    except (ValueError, TypeError):
+                        continue
+            if not season_id:
+                continue
+
+            # League stats (cached)
+            if season_id not in league_shot_cache:
+                league_shot_cache[season_id] = _compute_league_shot_stats(season_id)
+            lg = league_shot_cache[season_id]
+
+            # Skip leagues with insufficient data
+            if lg["match_count"] < 50:
+                continue
+
+            # Team data
+            home_last10 = fa.get_team_last10(home_id, season_id)
+            away_last10 = fa.get_team_last10(away_id, season_id)
+
+            home_prof = _extract_shot_profile(home_last10, is_home_upcoming=True)
+            away_prof = _extract_shot_profile(away_last10, is_home_upcoming=False)
+
+            # Skip if insufficient data (min 10 matches, or at least what we have)
+            if not home_prof or not away_prof:
+                continue
+            if home_prof["match_count"] < 5 or away_prof["match_count"] < 5:
+                continue
+
+            # --- Step 1: Baseline expected shots ---
+            # Home team expected shots = (Home avg shots at home + Away avg shots conceded away) / 2
+            home_expected = (home_prof["venue_shots"] + away_prof["venue_shots_against"]) / 2
+            # Away team expected shots = (Away avg shots away + Home avg shots conceded at home) / 2
+            away_expected = (away_prof["venue_shots"] + home_prof["venue_shots_against"]) / 2
+
+            # --- Step 2: Adjustments ---
+            # a) Recent 5-match trend (25% weight)
+            home_trend_adj = 1.0
+            if home_prof["avg_shots"] > 0:
+                home_trend_adj = 0.75 + 0.25 * (home_prof["recent5_avg"] / home_prof["avg_shots"])
+            away_trend_adj = 1.0
+            if away_prof["avg_shots"] > 0:
+                away_trend_adj = 0.75 + 0.25 * (away_prof["recent5_avg"] / away_prof["avg_shots"])
+
+            # b) League normalization multiplier
+            lg_median = lg["median_total"] if lg["median_total"] > 0 else 24.0
+            home_shot_idx = home_prof["avg_shots"] / (lg["median_home"] if lg["median_home"] > 0 else 13)
+            away_shot_idx = away_prof["avg_shots"] / (lg["median_away"] if lg["median_away"] > 0 else 11)
+
+            # c) Shot pace / conversion factor
+            home_conv_adj = 1.0 + (home_prof["conversion_pct"] - 33.0) / 200.0
+            away_conv_adj = 1.0 + (away_prof["conversion_pct"] - 33.0) / 200.0
+            home_conv_adj = max(0.9, min(1.1, home_conv_adj))
+            away_conv_adj = max(0.9, min(1.1, away_conv_adj))
+
+            # d) 1X2 odds-implied dominance
+            odds_1 = fa.safe_float(fix.get("odds_ft_1", fix.get("odds_home", 0)))
+            odds_x = fa.safe_float(fix.get("odds_ft_x", fix.get("odds_draw", 0)))
+            odds_2 = fa.safe_float(fix.get("odds_ft_2", fix.get("odds_away", 0)))
+            dominance_adj_h, dominance_adj_a = 1.0, 1.0
+            if odds_1 > 0 and odds_2 > 0:
+                imp_home = 1.0 / odds_1
+                imp_away = 1.0 / odds_2
+                total_imp = imp_home + imp_away + (1.0 / odds_x if odds_x > 0 else 0.25)
+                fav_ratio = imp_home / total_imp
+                dog_ratio = imp_away / total_imp
+                # Favorites tend to have more shots; underdogs trailing generate shots late
+                dominance_adj_h = 0.9 + fav_ratio * 0.3
+                dominance_adj_a = 0.9 + dog_ratio * 0.3
+                dominance_adj_h = max(0.92, min(1.15, dominance_adj_h))
+                dominance_adj_a = max(0.92, min(1.15, dominance_adj_a))
+
+            # Apply adjustments
+            adj_home = home_expected * home_trend_adj * home_conv_adj * dominance_adj_h
+            adj_away = away_expected * away_trend_adj * away_conv_adj * dominance_adj_a
+
+            # --- Step 3: Total expected shots ---
+            total_expected = adj_home + adj_away
+
+            # --- Determine shot line ---
+            # Try bookmaker shot lines first, fall back to league median
+            bk_line = None
+            bk_over_odds = None
+            bk_under_odds = None
+            # Probe fixture for shots line fields
+            for lf in ("total_shots_line", "shots_line", "shots_over_under_line",
+                        "odds_shots_over_line"):
+                val = fix.get(lf)
+                if val is not None:
+                    try:
+                        bk_line = float(val)
+                        break
+                    except (ValueError, TypeError):
+                        pass
+            for of in ("odds_shots_over", "odds_total_shots_over", "shots_over_odds"):
+                val = fix.get(of)
+                if val is not None:
+                    try:
+                        bk_over_odds = float(val)
+                        break
+                    except (ValueError, TypeError):
+                        pass
+            for uf in ("odds_shots_under", "odds_total_shots_under", "shots_under_odds"):
+                val = fix.get(uf)
+                if val is not None:
+                    try:
+                        bk_under_odds = float(val)
+                        break
+                    except (ValueError, TypeError):
+                        pass
+
+            # Fallback: use league median as line
+            shot_line = bk_line if bk_line and bk_line > 0 else round(lg_median - 0.5) + 0.5
+
+            # --- Step 4: Probability computation (analytical NegBin/Poisson) ---
+            # Compute variance from recent shot data
+            all_match_shots = []
+            for m in home_last10:
+                ms = m.get("shots", -1)
+                msa = m.get("shots_against", -1)
+                if ms >= 0 and msa >= 0:
+                    all_match_shots.append(ms + msa)
+            for m in away_last10:
+                ms = m.get("shots", -1)
+                msa = m.get("shots_against", -1)
+                if ms >= 0 and msa >= 0:
+                    all_match_shots.append(ms + msa)
+            if len(all_match_shots) >= 2:
+                sample_mean = sum(all_match_shots) / len(all_match_shots)
+                sample_var = sum((x - sample_mean) ** 2 for x in all_match_shots) / (len(all_match_shots) - 1)
+            else:
+                sample_var = total_expected  # Poisson assumption
+
+            prob_over_main = _prob_over(total_expected, sample_var, shot_line)
+            prob_over_plus1 = _prob_over(total_expected, sample_var, shot_line + 1)
+            prob_over_minus1 = _prob_over(total_expected, sample_var, shot_line - 1)
+
+            # --- Step 5: EV calculation ---
+            implied_prob = 0.0
+            ev_pct = 0.0
+            if bk_over_odds and bk_over_odds > 1.0:
+                implied_prob = round(1.0 / bk_over_odds * 100, 1)
+                ev_pct = round((prob_over_main * bk_over_odds - 1) * 100, 2)
+            elif prob_over_main >= 0.55:
+                # No bookmaker odds; estimate fair odds from our probability
+                fair_odds = 1.0 / prob_over_main if prob_over_main > 0 else 10.0
+                implied_prob = round(prob_over_main * 100, 1)
+                ev_pct = 0.0  # No edge calculable without bookmaker odds
+
+            prob_pct = round(prob_over_main * 100, 1)
+
+            # Filter: model probability >= 55%
+            if prob_pct < 55:
+                continue
+
+            # Filter: EV >= 3% if bookmaker odds available, else just probability
+            if bk_over_odds and bk_over_odds > 1.0 and ev_pct < 3.0:
+                continue
+
+            # Shot pace indicator
+            total_shot_rate = total_expected / 90.0  # per minute
+            if total_shot_rate >= 0.30:
+                pace = "High"
+            elif total_shot_rate >= 0.24:
+                pace = "Medium"
+            else:
+                pace = "Low"
+
+            # Style matchup indicator
+            combined_idx = (home_shot_idx + away_shot_idx) / 2
+            if combined_idx >= 1.15:
+                style = "Aggressive"
+            elif combined_idx >= 0.95:
+                style = "Balanced"
+            else:
+                style = "Slow"
+
+            # Probability edge vs implied
+            prob_edge = prob_pct - implied_prob if implied_prob > 0 else 0.0
+            shots_vs_line = round(total_expected - shot_line, 1)
+
+            results.append({
+                "home_name": home_name,
+                "away_name": away_name,
+                "league": league,
+                "kick_off": ko_str,
+                "kick_off_unix": ko_unix,
+                "league_median_shots": lg["median_total"],
+                "model_expected_total": round(total_expected, 1),
+                "line": shot_line,
+                "model_prob": prob_pct,
+                "prob_over_plus1": round(prob_over_plus1 * 100, 1),
+                "prob_over_minus1": round(prob_over_minus1 * 100, 1),
+                "implied_prob": implied_prob,
+                "ev_pct": ev_pct,
+                "home_expected": round(adj_home, 1),
+                "away_expected": round(adj_away, 1),
+                "home_avg_shots": home_prof["avg_shots"],
+                "away_avg_shots": away_prof["avg_shots"],
+                "home_sot": home_prof["avg_sot"],
+                "away_sot": away_prof["avg_sot"],
+                "home_conversion": home_prof["conversion_pct"],
+                "away_conversion": away_prof["conversion_pct"],
+                "shot_pace": pace,
+                "style_matchup": style,
+                "shots_vs_line": shots_vs_line,
+                "prob_edge": round(prob_edge, 1),
+                "has_bk_odds": bk_over_odds is not None and bk_over_odds > 1.0,
+                "bk_over_odds": round(bk_over_odds, 2) if bk_over_odds else None,
+            })
+
+        # Ranking: EV > probability edge > shots vs line
+        results.sort(key=lambda r: (r["ev_pct"], r["prob_edge"], r["shots_vs_line"]),
+                     reverse=True)
+        top5 = results[:5]
+
+        with _lock:
+            _state["shot_overs_results"] = top5
+            _state["shot_overs_status"] = "done"
+            _state["shot_overs_ts"] = int(datetime.now(timezone.utc).timestamp())
+
+    except Exception as e:
+        with _lock:
+            _state["shot_overs_status"] = "done"
+            _state["shot_overs_error"] = str(e)
+
+
+# ---------------------------------------------------------------------------
+# Top 5 Corner Over Opportunities
+# ---------------------------------------------------------------------------
+
+def _compute_league_corner_stats(season_id):
+    """Compute league-level corner statistics for normalization.
+
+    Returns dict with: median_total, mean_total, std_total,
+    median_home, median_away, match_count.
+    """
+    matches = fa.fetch_league_matches(season_id)
+    total_corners_list = []
+    home_corners_list = []
+    away_corners_list = []
+    for m in matches:
+        if m.get("status") != "complete":
+            continue
+        hc = fa.safe_int(m.get("team_a_corners",
+              m.get("home_corners", m.get("homeCorners", -1))))
+        ac = fa.safe_int(m.get("team_b_corners",
+              m.get("away_corners", m.get("awayCorners", -1))))
+        if hc < 0 or ac < 0:
+            continue
+        total_corners_list.append(hc + ac)
+        home_corners_list.append(hc)
+        away_corners_list.append(ac)
+    if not total_corners_list:
+        return {"median_total": 10.0, "mean_total": 10.0, "std_total": 3.0,
+                "median_home": 5.0, "median_away": 5.0, "match_count": 0}
+    total_corners_list.sort()
+    home_corners_list.sort()
+    away_corners_list.sort()
+    n = len(total_corners_list)
+    median_t = total_corners_list[n // 2]
+    mean_t = sum(total_corners_list) / n
+    var_t = sum((x - mean_t) ** 2 for x in total_corners_list) / max(n - 1, 1)
+    std_t = var_t ** 0.5
+    nh = len(home_corners_list)
+    na = len(away_corners_list)
+    return {
+        "median_total": median_t,
+        "mean_total": round(mean_t, 2),
+        "std_total": round(std_t, 2),
+        "median_home": home_corners_list[nh // 2],
+        "median_away": away_corners_list[na // 2],
+        "match_count": n,
+    }
+
+
+def _extract_corner_profile(last10, is_home_upcoming):
+    """Extract corner statistics from last-10 data with home/away split."""
+    if not last10:
+        return None
+
+    corners_for_all, corners_ag_all = [], []
+    home_corners, away_corners = [], []
+    home_corners_ag, away_corners_ag = [], []
+    shots_for_all, blocked_for_all = [], []
+
+    for m in last10:
+        cf = m.get("corners", -1)
+        ca = m.get("corners_against", -1)
+        sf = m.get("shots", -1)
+        if cf >= 0:
+            corners_for_all.append(cf)
+            if m.get("is_home"):
+                home_corners.append(cf)
+            else:
+                away_corners.append(cf)
+        if ca >= 0:
+            corners_ag_all.append(ca)
+            if m.get("is_home"):
+                home_corners_ag.append(ca)
+            else:
+                away_corners_ag.append(ca)
+        if sf >= 0:
+            shots_for_all.append(sf)
+        # Blocked shots (shots_against − sot_against if both available)
+        sa = m.get("shots_against", -1)
+        sota = m.get("sot_against", -1)
+        if sa >= 0 and sota >= 0 and sa >= sota:
+            blocked_for_all.append(sa - sota)
+
+    if not corners_for_all:
+        return None
+
+    avg_corners = _safe_avg(corners_for_all)
+    avg_corners_ag = _safe_avg(corners_ag_all) if corners_ag_all else avg_corners
+
+    if is_home_upcoming:
+        venue_corners = _safe_avg(home_corners) if home_corners else avg_corners
+        venue_corners_ag = _safe_avg(home_corners_ag) if home_corners_ag else avg_corners_ag
+    else:
+        venue_corners = _safe_avg(away_corners) if away_corners else avg_corners
+        venue_corners_ag = _safe_avg(away_corners_ag) if away_corners_ag else avg_corners_ag
+
+    # Recent 5-match trend
+    recent5 = corners_for_all[:5] if len(corners_for_all) >= 5 else corners_for_all
+    trend_avg = _safe_avg(recent5)
+
+    avg_shots = _safe_avg(shots_for_all) if shots_for_all else 0.0
+    avg_blocked = _safe_avg(blocked_for_all) if blocked_for_all else 0.0
+
+    return {
+        "avg_corners": round(avg_corners, 2),
+        "avg_corners_against": round(avg_corners_ag, 2),
+        "venue_corners": round(venue_corners, 2),
+        "venue_corners_against": round(venue_corners_ag, 2),
+        "recent5_avg": round(trend_avg, 2),
+        "avg_shots": round(avg_shots, 2),
+        "avg_blocked": round(avg_blocked, 2),
+        "match_count": len(corners_for_all),
+    }
+
+
+def _run_corner_overs():
+    """Analyse ALL league fixtures for Corner Over opportunities.
+
+    Model:
+      1. Expected corners per team (home/away split + opponent conceding).
+      2. Adjustments: shot volume, blocked shots, recent trend, league norm, dominance.
+      3. Match interaction multiplier (style logic).
+      4. NegBin/Poisson probability of Over main line.
+      5. EV from bookmaker odds if available.
+      6. Rank by EV / probability edge, return top 5.
+    """
+    with _lock:
+        if _state["corner_overs_status"] == "running":
+            return
+        now_ts_cache = int(datetime.now(timezone.utc).timestamp())
+        if (_state["corner_overs_status"] == "done"
+                and now_ts_cache - _state["corner_overs_ts"] < 300
+                and _state["corner_overs_results"]):
+            return
+        _state["corner_overs_status"] = "running"
+        _state["corner_overs_error"] = None
+        fixtures = list(_state["fixtures"])
+
+    try:
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        cutoff_ts = now_ts + 48 * 3600
+
+        league_corner_cache: dict[int, dict] = {}
+        results = []
+
+        for fix in fixtures:
+            ko_unix = int(fix.get("date_unix", 0) or 0)
+            if ko_unix and (ko_unix < now_ts - 3600 or ko_unix > cutoff_ts):
+                continue
+            status = (fix.get("status") or "").lower()
+            if status in ("postponed", "cancelled", "suspended"):
+                continue
+
+            home_name = fix.get("home_name", "Home")
+            away_name = fix.get("away_name", "Away")
+            home_id = int(fix.get("homeID", fix.get("home_id", 0)))
+            away_id = int(fix.get("awayID", fix.get("away_id", 0)))
+            league = fix.get("league_name", fix.get("competition_name", "Unknown"))
+            ko_str = (
+                datetime.fromtimestamp(ko_unix, tz=timezone.utc).strftime("%H:%M UTC")
+                if ko_unix else "TBD"
+            )
+
+            if not home_id or not away_id:
+                continue
+
+            # Season ID
+            season_id = None
+            for key in ("competition_id", "season_id", "league_id", "season"):
+                val = fix.get(key)
+                if val is not None:
+                    try:
+                        season_id = int(val)
+                        if season_id > 0:
+                            break
+                    except (ValueError, TypeError):
+                        continue
+            if not season_id:
+                continue
+
+            # League stats (cached)
+            if season_id not in league_corner_cache:
+                league_corner_cache[season_id] = _compute_league_corner_stats(season_id)
+            lg = league_corner_cache[season_id]
+
+            # Skip leagues with insufficient data (< 50 matches)
+            if lg["match_count"] < 50:
+                continue
+
+            # Team data
+            home_last10 = fa.get_team_last10(home_id, season_id)
+            away_last10 = fa.get_team_last10(away_id, season_id)
+
+            home_prof = _extract_corner_profile(home_last10, is_home_upcoming=True)
+            away_prof = _extract_corner_profile(away_last10, is_home_upcoming=False)
+
+            if not home_prof or not away_prof:
+                continue
+            if home_prof["match_count"] < 5 or away_prof["match_count"] < 5:
+                continue
+
+            # --- Step 1: Baseline expected corners ---
+            home_expected = (home_prof["venue_corners"] + away_prof["venue_corners_against"]) / 2
+            away_expected = (away_prof["venue_corners"] + home_prof["venue_corners_against"]) / 2
+
+            # --- Step 2: Adjustments ---
+            # a) Recent 5-match trend (25% weight)
+            home_trend_adj = 1.0
+            if home_prof["avg_corners"] > 0:
+                home_trend_adj = 0.75 + 0.25 * (home_prof["recent5_avg"] / home_prof["avg_corners"])
+            away_trend_adj = 1.0
+            if away_prof["avg_corners"] > 0:
+                away_trend_adj = 0.75 + 0.25 * (away_prof["recent5_avg"] / away_prof["avg_corners"])
+
+            # b) Shot volume factor (more shots → more corners from saves/deflections)
+            lg_median_total = lg["median_total"] if lg["median_total"] > 0 else 10.0
+            shot_adj_h = 1.0
+            shot_adj_a = 1.0
+            if home_prof["avg_shots"] > 0:
+                shot_adj_h = 1.0 + (home_prof["avg_shots"] - 12.0) / 60.0
+                shot_adj_h = max(0.92, min(1.1, shot_adj_h))
+            if away_prof["avg_shots"] > 0:
+                shot_adj_a = 1.0 + (away_prof["avg_shots"] - 12.0) / 60.0
+                shot_adj_a = max(0.92, min(1.1, shot_adj_a))
+
+            # c) Blocked shot inflation (blocked shots → more corners)
+            block_adj_h = 1.0 + (home_prof["avg_blocked"]) / 50.0
+            block_adj_a = 1.0 + (away_prof["avg_blocked"]) / 50.0
+            block_adj_h = max(1.0, min(1.12, block_adj_h))
+            block_adj_a = max(1.0, min(1.12, block_adj_a))
+
+            # d) 1X2 odds-implied dominance
+            odds_1 = fa.safe_float(fix.get("odds_ft_1", fix.get("odds_home", 0)))
+            odds_x = fa.safe_float(fix.get("odds_ft_x", fix.get("odds_draw", 0)))
+            odds_2 = fa.safe_float(fix.get("odds_ft_2", fix.get("odds_away", 0)))
+            dominance_adj_h, dominance_adj_a = 1.0, 1.0
+            if odds_1 > 0 and odds_2 > 0:
+                imp_home = 1.0 / odds_1
+                imp_away = 1.0 / odds_2
+                total_imp = imp_home + imp_away + (1.0 / odds_x if odds_x > 0 else 0.25)
+                fav_ratio = imp_home / total_imp
+                # Favorites push for corners; underdogs defend deep → corners
+                dominance_adj_h = 0.92 + fav_ratio * 0.25
+                dominance_adj_a = 0.92 + (1 - fav_ratio) * 0.25
+                dominance_adj_h = max(0.92, min(1.12, dominance_adj_h))
+                dominance_adj_a = max(0.92, min(1.12, dominance_adj_a))
+
+            # e) League normalization
+            home_corner_idx = home_prof["avg_corners"] / (lg["median_home"] if lg["median_home"] > 0 else 5)
+            away_corner_idx = away_prof["avg_corners"] / (lg["median_away"] if lg["median_away"] > 0 else 5)
+
+            # Apply adjustments
+            adj_home = home_expected * home_trend_adj * shot_adj_h * block_adj_h * dominance_adj_h
+            adj_away = away_expected * away_trend_adj * shot_adj_a * block_adj_a * dominance_adj_a
+
+            # --- Step 3: Match interaction multiplier ---
+            interaction = 1.0
+            # High-shot team vs blocking team → more corners
+            if home_prof["avg_shots"] > 13 and away_prof["avg_blocked"] > 3:
+                interaction += 0.05
+            if away_prof["avg_shots"] > 13 and home_prof["avg_blocked"] > 3:
+                interaction += 0.05
+            # Both below median → decrease
+            if home_corner_idx < 0.9 and away_corner_idx < 0.9:
+                interaction -= 0.05
+            interaction = max(0.9, min(1.15, interaction))
+
+            total_expected = (adj_home + adj_away) * interaction
+
+            # --- Corner line ---
+            bk_corner_line = None
+            bk_corner_over_odds = None
+            bk_corner_under_odds = None
+            for lf in ("total_corners_line", "corners_line", "odds_corners_over_line",
+                        "corners_over_under_line"):
+                val = fix.get(lf)
+                if val is not None:
+                    try:
+                        bk_corner_line = float(val)
+                        break
+                    except (ValueError, TypeError):
+                        pass
+            for of in ("odds_corners_over", "odds_total_corners_over", "corners_over_odds"):
+                val = fix.get(of)
+                if val is not None:
+                    try:
+                        bk_corner_over_odds = float(val)
+                        break
+                    except (ValueError, TypeError):
+                        pass
+            for uf in ("odds_corners_under", "odds_total_corners_under", "corners_under_odds"):
+                val = fix.get(uf)
+                if val is not None:
+                    try:
+                        bk_corner_under_odds = float(val)
+                        break
+                    except (ValueError, TypeError):
+                        pass
+
+            corner_line = bk_corner_line if bk_corner_line and bk_corner_line > 0 else round(lg_median_total - 0.5) + 0.5
+
+            # --- Step 4: Probability ---
+            all_match_corners = []
+            for m in home_last10:
+                mc = m.get("match_corners", -1)
+                if mc >= 0:
+                    all_match_corners.append(mc)
+            for m in away_last10:
+                mc = m.get("match_corners", -1)
+                if mc >= 0:
+                    all_match_corners.append(mc)
+            if len(all_match_corners) >= 2:
+                c_mean = sum(all_match_corners) / len(all_match_corners)
+                c_var = sum((x - c_mean) ** 2 for x in all_match_corners) / (len(all_match_corners) - 1)
+            else:
+                c_var = total_expected
+
+            prob_over_main = _prob_over(total_expected, c_var, corner_line)
+            prob_over_plus1 = _prob_over(total_expected, c_var, corner_line + 1)
+            prob_over_minus1 = _prob_over(total_expected, c_var, corner_line - 1)
+
+            # --- Step 5: EV ---
+            implied_prob = 0.0
+            ev_pct = 0.0
+            if bk_corner_over_odds and bk_corner_over_odds > 1.0:
+                implied_prob = round(1.0 / bk_corner_over_odds * 100, 1)
+                ev_pct = round((prob_over_main * bk_corner_over_odds - 1) * 100, 2)
+            elif prob_over_main >= 0.55:
+                implied_prob = round(prob_over_main * 100, 1)
+                ev_pct = 0.0
+
+            prob_pct = round(prob_over_main * 100, 1)
+
+            if prob_pct < 55:
+                continue
+            if bk_corner_over_odds and bk_corner_over_odds > 1.0 and ev_pct < 3.0:
+                continue
+
+            # Over potential indicator
+            combined_idx = (home_corner_idx + away_corner_idx) / 2
+            if combined_idx >= 1.15:
+                over_potential = "High"
+            elif combined_idx >= 0.95:
+                over_potential = "Medium"
+            else:
+                over_potential = "Low"
+
+            prob_edge = prob_pct - implied_prob if implied_prob > 0 else 0.0
+            corners_vs_line = round(total_expected - corner_line, 1)
+
+            results.append({
+                "home_name": home_name,
+                "away_name": away_name,
+                "league": league,
+                "kick_off": ko_str,
+                "kick_off_unix": ko_unix,
+                "league_median_corners": lg["median_total"],
+                "model_expected_total": round(total_expected, 1),
+                "line": corner_line,
+                "model_prob": prob_pct,
+                "prob_over_plus1": round(prob_over_plus1 * 100, 1),
+                "prob_over_minus1": round(prob_over_minus1 * 100, 1),
+                "implied_prob": implied_prob,
+                "ev_pct": ev_pct,
+                "home_expected": round(adj_home, 1),
+                "away_expected": round(adj_away, 1),
+                "home_avg_corners": home_prof["avg_corners"],
+                "away_avg_corners": away_prof["avg_corners"],
+                "home_avg_shots": home_prof["avg_shots"],
+                "away_avg_shots": away_prof["avg_shots"],
+                "home_avg_blocked": home_prof["avg_blocked"],
+                "away_avg_blocked": away_prof["avg_blocked"],
+                "over_potential": over_potential,
+                "corners_vs_line": corners_vs_line,
+                "prob_edge": round(prob_edge, 1),
+                "has_bk_odds": bk_corner_over_odds is not None and bk_corner_over_odds > 1.0,
+                "bk_over_odds": round(bk_corner_over_odds, 2) if bk_corner_over_odds else None,
+            })
+
+        results.sort(key=lambda r: (r["ev_pct"], r["prob_edge"], r["corners_vs_line"]),
+                     reverse=True)
+        top5 = results[:5]
+
+        with _lock:
+            _state["corner_overs_results"] = top5
+            _state["corner_overs_status"] = "done"
+            _state["corner_overs_ts"] = int(datetime.now(timezone.utc).timestamp())
+
+    except Exception as e:
+        with _lock:
+            _state["corner_overs_status"] = "done"
+            _state["corner_overs_error"] = str(e)
+
+
 @app.route("/api/over35cards", methods=["POST"])
 def trigger_over35cards():
     """Trigger Over 3.5 Cards analysis."""
@@ -1297,6 +2161,58 @@ def over35cards_status():
             "status": _state["over35c_status"],
             "results": _state["over35c_results"],
             "error": _state["over35c_error"],
+            "api_credits_used": fa.api_credits_used,
+        })
+
+
+@app.route("/api/shot-overs", methods=["POST"])
+def trigger_shot_overs():
+    """Trigger Shot Over Opportunities analysis."""
+    with _lock:
+        if _state["shot_overs_status"] == "running":
+            return jsonify({"status": "running"}), 202
+        if not _state["fixtures"]:
+            return jsonify({"error": "No fixtures loaded. Refresh first."}), 400
+
+    t = threading.Thread(target=_run_shot_overs, daemon=True)
+    t.start()
+    return jsonify({"status": "running"}), 202
+
+
+@app.route("/api/shot-overs-status")
+def shot_overs_status():
+    """Poll Shot Over analysis status and results."""
+    with _lock:
+        return jsonify({
+            "status": _state["shot_overs_status"],
+            "results": _state["shot_overs_results"],
+            "error": _state["shot_overs_error"],
+            "api_credits_used": fa.api_credits_used,
+        })
+
+
+@app.route("/api/corner-overs", methods=["POST"])
+def trigger_corner_overs():
+    """Trigger Corner Over Opportunities analysis."""
+    with _lock:
+        if _state["corner_overs_status"] == "running":
+            return jsonify({"status": "running"}), 202
+        if not _state["fixtures"]:
+            return jsonify({"error": "No fixtures loaded. Refresh first."}), 400
+
+    t = threading.Thread(target=_run_corner_overs, daemon=True)
+    t.start()
+    return jsonify({"status": "running"}), 202
+
+
+@app.route("/api/corner-overs-status")
+def corner_overs_status():
+    """Poll Corner Over analysis status and results."""
+    with _lock:
+        return jsonify({
+            "status": _state["corner_overs_status"],
+            "results": _state["corner_overs_results"],
+            "error": _state["corner_overs_error"],
             "api_credits_used": fa.api_credits_used,
         })
 

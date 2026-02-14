@@ -2044,7 +2044,7 @@ def _run_corner_overs():
                     except (ValueError, TypeError):
                         pass
 
-            corner_line = bk_corner_line if bk_corner_line and bk_corner_line > 0 else round(lg_median_total - 0.5) + 0.5
+            corner_line = 10.5  # Fixed: always evaluate Over 10.5 corners
 
             # --- Step 4: Probability ---
             all_match_corners = []

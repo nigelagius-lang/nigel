@@ -907,7 +907,7 @@
 </div>
 
 <div class="container">
-  {% if leagues %}
+  {% if sections %}
     <div class="filter-bar">
       <div class="league-dropdown" id="leagueDropdown">
         <div class="dropdown-toggle" onclick="toggleDropdown()">
@@ -946,10 +946,10 @@
     </div>
 
     <div id="leagueContainer">
-      {% for league_name, cards in leagues.items() %}
-        <div class="league-section" data-league="{{ league_name }}" data-country="{{ league_country.get(league_name, 'Other') }}">
+      {% for section_key, cards in sections.items() %}
+        <div class="league-section" data-league="{{ section_league.get(section_key, 'Other') }}" data-country="{{ section_country.get(section_key, 'Other') }}">
           <div class="league-header" onclick="toggleLeague(this)">
-            <h2>{{ league_country.get(league_name, 'Other')|upper }} &ndash; {{ league_name|upper }}</h2>
+            <h2>{{ section_country.get(section_key, 'Other')|upper }} &ndash; {{ section_league.get(section_key, 'Other')|upper }}</h2>
             <div style="display:flex; align-items:center; gap:12px;">
               <span class="league-count">{{ cards|length }} match{{ 'es' if cards|length != 1 }}</span>
               <span class="toggle-icon">&#9660;</span>

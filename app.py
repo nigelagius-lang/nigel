@@ -69,12 +69,13 @@ LEAGUE_COUNTRY_MAP = {
     "scottish premiership": "Scotland",
     "scottish championship": "Scotland",
     # Greece
-    "super league": "Greece",
+    "super league greece": "Greece",
+    "greek super league": "Greece",
     # Austria
     "austrian bundesliga": "Austria",
     # Switzerland
-    "super league": "Switzerland",
     "swiss super league": "Switzerland",
+    "super league switzerland": "Switzerland",
     # Denmark
     "superliga": "Denmark",
     "superligaen": "Denmark",
@@ -94,8 +95,9 @@ LEAGUE_COUNTRY_MAP = {
     "mls": "USA",
     "major league soccer": "USA",
     # Brazil
-    "serie a": "Brazil",
     "brasileirao": "Brazil",
+    "brasileirao serie a": "Brazil",
+    "brasileirao serie b": "Brazil",
     # Argentina
     "liga profesional": "Argentina",
     "primera division": "Argentina",
@@ -113,7 +115,7 @@ LEAGUE_COUNTRY_MAP = {
     "chinese super league": "China",
     # Saudi Arabia
     "saudi pro league": "Saudi Arabia",
-    # International
+    # International / Continental
     "champions league": "Europe",
     "europa league": "Europe",
     "conference league": "Europe",
@@ -123,17 +125,30 @@ LEAGUE_COUNTRY_MAP = {
     "nations league": "Europe",
     "africa cup": "Africa",
     "asian cup": "Asia",
+    "copa libertadores": "South America",
+    "copa sudamericana": "South America",
+    "afc champions league": "Asia",
+    "caf champions league": "Africa",
 }
 
 
 def _guess_country(fixture: dict) -> str:
     """Determine country from fixture data, using API field or league name."""
-    # 1. Try API-provided country field
-    country = (fixture.get("country") or "").strip()
-    if country:
-        return country
+    # 1. Try API-provided country field (several possible names)
+    for field in ("country", "country_name"):
+        country = (fixture.get(field) or "").strip()
+        if country:
+            # Normalise to title case (API may return "england" lowercase)
+            return country.title()
 
-    # 2. Try matching league name against our map
+    # 2. Try nested competition object
+    comp = fixture.get("competition")
+    if isinstance(comp, dict):
+        country = (comp.get("country") or comp.get("country_name") or "").strip()
+        if country:
+            return country.title()
+
+    # 3. Derive from league/competition name
     league = (
         fixture.get("league_name")
         or fixture.get("competition_name")
@@ -141,18 +156,27 @@ def _guess_country(fixture: dict) -> str:
     ).strip()
     league_lower = league.lower()
 
-    # Exact match
+    # 3a. Check for "Country - League" format first (many APIs use this)
+    if " - " in league:
+        return league.split(" - ", 1)[0].strip().title()
+
+    # 3b. Exact match against our map
     if league_lower in LEAGUE_COUNTRY_MAP:
         return LEAGUE_COUNTRY_MAP[league_lower]
 
-    # Partial/substring match
+    # 3c. Check if a map key is a full-word match within the league name
+    #     e.g. "English Premier League" contains "premier league"
+    #     Only match if the pattern forms complete words (not partial)
+    best_match = ""
+    best_country = ""
     for pattern, mapped_country in LEAGUE_COUNTRY_MAP.items():
-        if pattern in league_lower or league_lower in pattern:
-            return mapped_country
-
-    # 3. Check if league name starts with "Country - League" format
-    if " - " in league:
-        return league.split(" - ", 1)[0].strip()
+        if pattern in league_lower:
+            # Prefer longer (more specific) pattern matches
+            if len(pattern) > len(best_match):
+                best_match = pattern
+                best_country = mapped_country
+    if best_country:
+        return best_country
 
     return "Other"
 
@@ -318,26 +342,31 @@ def dashboard():
 
         cards.append(card)
 
-    # Sort by kick-off time
-    cards.sort(key=lambda c: c.get("kick_off_unix", 0))
+    # Sort by country, then league, then kick-off time
+    cards.sort(key=lambda c: (
+        c.get("country") or "Other",
+        c.get("league") or "Other",
+        c.get("kick_off_unix", 0),
+    ))
 
-    # Group by league (preserving kick-off order within each group)
+    # Group by country+league so same-named leagues in different countries
+    # stay separate (e.g. Italy Serie A vs Brazil Serie A)
     from collections import OrderedDict
-    leagues: OrderedDict[str, list] = OrderedDict()
-    for c in cards:
-        league = c.get("league") or "Other"
-        leagues.setdefault(league, []).append(c)
-
-    # Country data for the dropdown
-    TOP_COUNTRIES = ["England", "France", "Germany", "Spain", "Italy"]
-    league_country: dict[str, str] = {}
+    sections: OrderedDict[str, list] = OrderedDict()
+    section_country: dict[str, str] = {}
+    section_league: dict[str, str] = {}
     country_counts: dict[str, int] = {}
+
     for c in cards:
         country = c.get("country") or "Other"
-        lg = c.get("league") or "Other"
-        league_country[lg] = country
+        league = c.get("league") or "Other"
+        key = f"{country}::{league}"
+        sections.setdefault(key, []).append(c)
+        section_country[key] = country
+        section_league[key] = league
         country_counts[country] = country_counts.get(country, 0) + 1
 
+    TOP_COUNTRIES = ["England", "France", "Germany", "Spain", "Italy"]
     top_countries = [(ct, country_counts[ct]) for ct in TOP_COUNTRIES if ct in country_counts]
     other_countries = sorted(
         [(ct, n) for ct, n in country_counts.items() if ct not in TOP_COUNTRIES]
@@ -345,8 +374,9 @@ def dashboard():
 
     return render_template(
         "dashboard.html",
-        leagues=leagues,
-        league_country=league_country,
+        sections=sections,
+        section_country=section_country,
+        section_league=section_league,
         top_countries=top_countries,
         other_countries=other_countries,
         last_refresh=last_refresh,

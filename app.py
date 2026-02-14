@@ -1554,13 +1554,15 @@ def _run_shot_overs():
             away_expected = (away_prof["venue_shots"] + home_prof["venue_shots_against"]) / 2
 
             # --- Step 2: Adjustments ---
-            # a) Recent 5-match trend (25% weight)
+            # a) Recent 5-match trend (25% weight) — capped to prevent inflation
             home_trend_adj = 1.0
             if home_prof["avg_shots"] > 0:
                 home_trend_adj = 0.75 + 0.25 * (home_prof["recent5_avg"] / home_prof["avg_shots"])
+                home_trend_adj = max(0.90, min(1.10, home_trend_adj))
             away_trend_adj = 1.0
             if away_prof["avg_shots"] > 0:
                 away_trend_adj = 0.75 + 0.25 * (away_prof["recent5_avg"] / away_prof["avg_shots"])
+                away_trend_adj = max(0.90, min(1.10, away_trend_adj))
 
             # b) League normalization multiplier
             lg_median = lg["median_total"] if lg["median_total"] > 0 else 24.0
@@ -1570,8 +1572,8 @@ def _run_shot_overs():
             # c) Shot pace / conversion factor
             home_conv_adj = 1.0 + (home_prof["conversion_pct"] - 33.0) / 200.0
             away_conv_adj = 1.0 + (away_prof["conversion_pct"] - 33.0) / 200.0
-            home_conv_adj = max(0.9, min(1.1, home_conv_adj))
-            away_conv_adj = max(0.9, min(1.1, away_conv_adj))
+            home_conv_adj = max(0.95, min(1.05, home_conv_adj))
+            away_conv_adj = max(0.95, min(1.05, away_conv_adj))
 
             # d) 1X2 odds-implied dominance
             odds_1 = fa.safe_float(fix.get("odds_ft_1", fix.get("odds_home", 0)))
@@ -1585,14 +1587,18 @@ def _run_shot_overs():
                 fav_ratio = imp_home / total_imp
                 dog_ratio = imp_away / total_imp
                 # Favorites tend to have more shots; underdogs trailing generate shots late
-                dominance_adj_h = 0.9 + fav_ratio * 0.3
-                dominance_adj_a = 0.9 + dog_ratio * 0.3
-                dominance_adj_h = max(0.92, min(1.15, dominance_adj_h))
-                dominance_adj_a = max(0.92, min(1.15, dominance_adj_a))
+                dominance_adj_h = 0.95 + fav_ratio * 0.15
+                dominance_adj_a = 0.95 + dog_ratio * 0.15
+                dominance_adj_h = max(0.95, min(1.08, dominance_adj_h))
+                dominance_adj_a = max(0.95, min(1.08, dominance_adj_a))
 
-            # Apply adjustments
-            adj_home = home_expected * home_trend_adj * home_conv_adj * dominance_adj_h
-            adj_away = away_expected * away_trend_adj * away_conv_adj * dominance_adj_a
+            # Apply adjustments — cap total multiplier to ±15% of baseline
+            home_multiplier = home_trend_adj * home_conv_adj * dominance_adj_h
+            away_multiplier = away_trend_adj * away_conv_adj * dominance_adj_a
+            home_multiplier = max(0.85, min(1.15, home_multiplier))
+            away_multiplier = max(0.85, min(1.15, away_multiplier))
+            adj_home = home_expected * home_multiplier
+            adj_away = away_expected * away_multiplier
 
             # --- Step 3: Total expected shots ---
             total_expected = adj_home + adj_away
@@ -1951,30 +1957,32 @@ def _run_corner_overs():
             away_expected = (away_prof["venue_corners"] + home_prof["venue_corners_against"]) / 2
 
             # --- Step 2: Adjustments ---
-            # a) Recent 5-match trend (25% weight)
+            # a) Recent 5-match trend (25% weight) — capped to prevent inflation
             home_trend_adj = 1.0
             if home_prof["avg_corners"] > 0:
                 home_trend_adj = 0.75 + 0.25 * (home_prof["recent5_avg"] / home_prof["avg_corners"])
+                home_trend_adj = max(0.90, min(1.10, home_trend_adj))
             away_trend_adj = 1.0
             if away_prof["avg_corners"] > 0:
                 away_trend_adj = 0.75 + 0.25 * (away_prof["recent5_avg"] / away_prof["avg_corners"])
+                away_trend_adj = max(0.90, min(1.10, away_trend_adj))
 
             # b) Shot volume factor (more shots → more corners from saves/deflections)
             lg_median_total = lg["median_total"] if lg["median_total"] > 0 else 10.0
             shot_adj_h = 1.0
             shot_adj_a = 1.0
             if home_prof["avg_shots"] > 0:
-                shot_adj_h = 1.0 + (home_prof["avg_shots"] - 12.0) / 60.0
-                shot_adj_h = max(0.92, min(1.1, shot_adj_h))
+                shot_adj_h = 1.0 + (home_prof["avg_shots"] - 12.0) / 100.0
+                shot_adj_h = max(0.96, min(1.05, shot_adj_h))
             if away_prof["avg_shots"] > 0:
-                shot_adj_a = 1.0 + (away_prof["avg_shots"] - 12.0) / 60.0
-                shot_adj_a = max(0.92, min(1.1, shot_adj_a))
+                shot_adj_a = 1.0 + (away_prof["avg_shots"] - 12.0) / 100.0
+                shot_adj_a = max(0.96, min(1.05, shot_adj_a))
 
             # c) Blocked shot inflation (blocked shots → more corners)
-            block_adj_h = 1.0 + (home_prof["avg_blocked"]) / 50.0
-            block_adj_a = 1.0 + (away_prof["avg_blocked"]) / 50.0
-            block_adj_h = max(1.0, min(1.12, block_adj_h))
-            block_adj_a = max(1.0, min(1.12, block_adj_a))
+            block_adj_h = 1.0 + (home_prof["avg_blocked"]) / 100.0
+            block_adj_a = 1.0 + (away_prof["avg_blocked"]) / 100.0
+            block_adj_h = max(1.0, min(1.05, block_adj_h))
+            block_adj_a = max(1.0, min(1.05, block_adj_a))
 
             # d) 1X2 odds-implied dominance
             odds_1 = fa.safe_float(fix.get("odds_ft_1", fix.get("odds_home", 0)))
@@ -1987,30 +1995,34 @@ def _run_corner_overs():
                 total_imp = imp_home + imp_away + (1.0 / odds_x if odds_x > 0 else 0.25)
                 fav_ratio = imp_home / total_imp
                 # Favorites push for corners; underdogs defend deep → corners
-                dominance_adj_h = 0.92 + fav_ratio * 0.25
-                dominance_adj_a = 0.92 + (1 - fav_ratio) * 0.25
-                dominance_adj_h = max(0.92, min(1.12, dominance_adj_h))
-                dominance_adj_a = max(0.92, min(1.12, dominance_adj_a))
+                dominance_adj_h = 0.95 + fav_ratio * 0.12
+                dominance_adj_a = 0.95 + (1 - fav_ratio) * 0.12
+                dominance_adj_h = max(0.95, min(1.06, dominance_adj_h))
+                dominance_adj_a = max(0.95, min(1.06, dominance_adj_a))
 
             # e) League normalization
             home_corner_idx = home_prof["avg_corners"] / (lg["median_home"] if lg["median_home"] > 0 else 5)
             away_corner_idx = away_prof["avg_corners"] / (lg["median_away"] if lg["median_away"] > 0 else 5)
 
-            # Apply adjustments
-            adj_home = home_expected * home_trend_adj * shot_adj_h * block_adj_h * dominance_adj_h
-            adj_away = away_expected * away_trend_adj * shot_adj_a * block_adj_a * dominance_adj_a
+            # Apply adjustments — cap total multiplier to ±15% of baseline
+            home_multiplier = home_trend_adj * shot_adj_h * block_adj_h * dominance_adj_h
+            away_multiplier = away_trend_adj * shot_adj_a * block_adj_a * dominance_adj_a
+            home_multiplier = max(0.85, min(1.15, home_multiplier))
+            away_multiplier = max(0.85, min(1.15, away_multiplier))
+            adj_home = home_expected * home_multiplier
+            adj_away = away_expected * away_multiplier
 
             # --- Step 3: Match interaction multiplier ---
             interaction = 1.0
             # High-shot team vs blocking team → more corners
             if home_prof["avg_shots"] > 13 and away_prof["avg_blocked"] > 3:
-                interaction += 0.05
+                interaction += 0.03
             if away_prof["avg_shots"] > 13 and home_prof["avg_blocked"] > 3:
-                interaction += 0.05
+                interaction += 0.03
             # Both below median → decrease
             if home_corner_idx < 0.9 and away_corner_idx < 0.9:
-                interaction -= 0.05
-            interaction = max(0.9, min(1.15, interaction))
+                interaction -= 0.03
+            interaction = max(0.95, min(1.08, interaction))
 
             total_expected = (adj_home + adj_away) * interaction
 

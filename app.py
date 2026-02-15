@@ -1359,19 +1359,23 @@ def _prob_over(mean, var, line):
 # Top 5 Shot Over Opportunities
 # ---------------------------------------------------------------------------
 
-_ALLOWED_SHOT_LEAGUES = {
-    "premier league", "ligue 1", "la liga", "serie a", "bundesliga",
-    "champions league", "europa league",
+_BLOCKED_SHOT_LEAGUES = {
+    "friendly", "qualification", "u19", "u20", "u21", "u23",
+    "women", "reserve", "youth", "amateurs",
 }
 
 
 def _is_allowed_shot_league(league_name: str) -> bool:
-    """Check if fixture belongs to one of the 7 allowed shot competitions."""
+    """Check if fixture is in a valid competition for shot analysis.
+
+    All professional leagues are allowed; only friendlies, youth, and
+    qualification rounds are excluded.
+    """
     name_lower = league_name.lower()
-    for allowed in _ALLOWED_SHOT_LEAGUES:
-        if allowed in name_lower:
-            return True
-    return False
+    for blocked in _BLOCKED_SHOT_LEAGUES:
+        if blocked in name_lower:
+            return False
+    return True
 
 
 def _compute_league_shot_stats(season_id):
@@ -1941,7 +1945,7 @@ def _run_card_risk():
 
 
 def _run_shot_overs():
-    """Analyse fixtures in 7 allowed competitions for Shot Over opportunities.
+    """Analyse fixtures across all professional leagues for Shot Over opportunities.
 
     Model:
       1. Compute expected shots per team (home/away split + opponent conceding).
@@ -2015,7 +2019,7 @@ def _run_shot_overs():
             lg = league_shot_cache[season_id]
 
             # Skip leagues with insufficient data
-            if lg["match_count"] < 50:
+            if lg["match_count"] < 15:
                 continue
 
             # Team data
@@ -2025,10 +2029,10 @@ def _run_shot_overs():
             home_prof = _extract_shot_profile(home_last10, is_home_upcoming=True)
             away_prof = _extract_shot_profile(away_last10, is_home_upcoming=False)
 
-            # Skip if insufficient data (min 10 matches, or at least what we have)
+            # Skip if insufficient data
             if not home_prof or not away_prof:
                 continue
-            if home_prof["match_count"] < 5 or away_prof["match_count"] < 5:
+            if home_prof["match_count"] < 3 or away_prof["match_count"] < 3:
                 continue
 
             # --- Step 1: Baseline expected shots ---
@@ -2151,7 +2155,7 @@ def _run_shot_overs():
             if bk_over_odds and bk_over_odds > 1.0:
                 implied_prob = round(1.0 / bk_over_odds * 100, 1)
                 ev_pct = round((prob_over_main * bk_over_odds - 1) * 100, 2)
-            elif prob_over_main >= 0.55:
+            elif prob_over_main >= 0.50:
                 # No bookmaker odds; estimate fair odds from our probability
                 fair_odds = 1.0 / prob_over_main if prob_over_main > 0 else 10.0
                 implied_prob = round(prob_over_main * 100, 1)
@@ -2159,12 +2163,12 @@ def _run_shot_overs():
 
             prob_pct = round(prob_over_main * 100, 1)
 
-            # Filter: model probability >= 55%
-            if prob_pct < 55:
+            # Filter: model probability >= 50%
+            if prob_pct < 50:
                 continue
 
-            # Filter: EV >= 3% if bookmaker odds available, else just probability
-            if bk_over_odds and bk_over_odds > 1.0 and ev_pct < 3.0:
+            # Filter: EV >= 1% if bookmaker odds available, else just probability
+            if bk_over_odds and bk_over_odds > 1.0 and ev_pct < 1.0:
                 continue
 
             # Shot pace indicator

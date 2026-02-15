@@ -214,6 +214,9 @@ _state = {
     "corner_overs_results": [],
     "corner_overs_error": None,
     "corner_overs_ts": 0,         # cache timestamp
+    "card_risk_status": "idle",
+    "card_risk_results": [],
+    "card_risk_error": None,
 }
 
 
@@ -1486,6 +1489,457 @@ def _extract_shot_profile(last10, is_home_upcoming):
     }
 
 
+# ---------------------------------------------------------------------------
+# Card Risk Engine – Top 5 Most Likely Players to Be Carded (24h)
+# ---------------------------------------------------------------------------
+
+def _minmax_norm(val: float, lo: float, hi: float) -> float:
+    """Normalize val to 0-1 via min-max.  Clamps to [0, 1]."""
+    if hi <= lo:
+        return 0.0
+    return max(0.0, min(1.0, (val - lo) / (hi - lo)))
+
+
+def _get_player_card_stats(detail: dict, appearances: int) -> dict:
+    """Extract card-relevant per-90 stats from a player-stats response.
+
+    Returns dict with yc_per90, fouls_per90, tackles_per90, duels_per90,
+    minutes, and rc_per90.  All fallback to 0 when unavailable.
+    """
+    mins = fa._extract_detail_stat(detail,
+        "minutes_played_overall", "minutes_overall",
+        "minutes_played", "mins_played")
+    if mins <= 0 and appearances > 0:
+        mins = appearances * 70  # fallback estimate
+
+    nineties = mins / 90.0 if mins > 0 else max(appearances, 1)
+
+    # Yellow cards
+    yc_total = fa._extract_detail_stat(detail,
+        "yellow_cards_overall", "yellow_cards", "total_yellow_cards",
+        "yellowCards_overall")
+    yc_per90 = fa._extract_detail_stat(detail,
+        "yellow_cards_per_90", "yellow_cards_per_90_overall",
+        "yellow_cards_per_game")
+    if yc_per90 == 0 and yc_total > 0:
+        yc_per90 = yc_total / nineties
+
+    # Red cards
+    rc_total = fa._extract_detail_stat(detail,
+        "red_cards_overall", "red_cards", "total_red_cards",
+        "redCards_overall")
+    rc_per90 = rc_total / nineties if rc_total > 0 else 0.0
+
+    # Fouls committed
+    fouls_total = fa._extract_detail_stat(detail,
+        "fouls_committed_overall", "fouls_committed",
+        "total_fouls_committed", "fouls_overall")
+    fouls_per90 = fa._extract_detail_stat(detail,
+        "fouls_committed_per_game", "fouls_committed_per_90_overall",
+        "fouls_per_game", "fouls_per_90",
+        "avg_fouls_committed_per_game")
+    if fouls_per90 == 0 and fouls_total > 0:
+        fouls_per90 = fouls_total / nineties
+
+    # Tackles (may not be available – fallback to position heuristic later)
+    tackles_per90 = fa._extract_detail_stat(detail,
+        "tackles_per_game", "tackles_per_90", "tackles_per_90_overall",
+        "avg_tackles_per_game", "tackles_successful_per_game")
+    tackles_total = fa._extract_detail_stat(detail,
+        "tackles_overall", "total_tackles", "tackles_successful_overall",
+        "tackles")
+    if tackles_per90 == 0 and tackles_total > 0:
+        tackles_per90 = tackles_total / nineties
+
+    # Duels (may not be available)
+    duels_per90 = fa._extract_detail_stat(detail,
+        "duels_per_game", "duels_per_90", "duels_won_per_game",
+        "total_duels_per_game")
+    duels_total = fa._extract_detail_stat(detail,
+        "duels_overall", "total_duels", "duels_won_overall", "duels_total")
+    if duels_per90 == 0 and duels_total > 0:
+        duels_per90 = duels_total / nineties
+
+    return {
+        "yc_per90": yc_per90,
+        "rc_per90": rc_per90,
+        "fouls_per90": fouls_per90,
+        "tackles_per90": tackles_per90,
+        "duels_per90": duels_per90,
+        "minutes": mins,
+        "yc_total": yc_total,
+    }
+
+
+def _position_tackle_estimate(position: str) -> float:
+    """Fallback tackle/90 estimate by position when API data is missing."""
+    pos = position.lower()
+    if any(p in pos for p in ("defend", "back", "cb", "lb", "rb", "wing-back")):
+        return 2.5
+    if any(p in pos for p in ("midfield", "mid", "dm", "cm")):
+        return 2.0
+    if any(p in pos for p in ("forward", "striker", "wing", "att")):
+        return 1.0
+    return 1.5
+
+
+def _position_duel_estimate(position: str) -> float:
+    """Fallback duels/90 estimate by position when API data is missing."""
+    pos = position.lower()
+    if any(p in pos for p in ("defend", "back", "cb", "lb", "rb", "wing-back")):
+        return 6.0
+    if any(p in pos for p in ("midfield", "mid", "dm", "cm")):
+        return 5.5
+    if any(p in pos for p in ("forward", "striker", "wing", "att")):
+        return 4.0
+    return 4.5
+
+
+def _run_card_risk():
+    """Analyse all fixtures (next 24h) for player card risk.
+
+    Card Risk Score (CRS) per player:
+      CRS = 0.40×BasePlayerRisk + 0.20×RefereeScore + 0.15×MatchContextScore
+          + 0.15×OpponentRisk + 0.10×TeamAggressionScore
+
+    Card probability via logistic: 1 / (1 + e^(-8*(CRS-0.5)))
+
+    Output: Top 5 players above 35% probability, sorted descending.
+    """
+    with _lock:
+        if _state["card_risk_status"] == "running":
+            return
+        _state["card_risk_status"] = "running"
+        _state["card_risk_error"] = None
+        fixtures = list(_state["fixtures"])
+
+    try:
+        import math
+
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        cutoff_ts = now_ts + 24 * 3600  # next 24 hours only
+
+        all_players: list[dict] = []
+
+        for fix in fixtures:
+            ko_unix = int(fix.get("date_unix", 0) or 0)
+            if ko_unix and (ko_unix < now_ts - 3600 or ko_unix > cutoff_ts):
+                continue
+
+            home_name = fix.get("home_name", "Home")
+            away_name = fix.get("away_name", "Away")
+            home_id = int(fix.get("homeID", fix.get("home_id", 0)))
+            away_id = int(fix.get("awayID", fix.get("away_id", 0)))
+            league = fix.get("league_name", fix.get("competition_name", "Unknown"))
+            ko_str = (
+                datetime.fromtimestamp(ko_unix, tz=timezone.utc).strftime("%H:%M UTC")
+                if ko_unix else "TBD"
+            )
+
+            if not home_id or not away_id:
+                continue
+
+            # --- Season ID ---
+            season_id = None
+            for key in ("competition_id", "season_id", "league_id", "season"):
+                val = fix.get(key)
+                if val is not None:
+                    try:
+                        season_id = int(val)
+                        if season_id > 0:
+                            break
+                    except (ValueError, TypeError):
+                        continue
+            if not season_id:
+                continue
+
+            # --- Team last-10 (for TeamAggression & MatchContext) ---
+            home_last10 = fa.get_team_last10(home_id, season_id)
+            away_last10 = fa.get_team_last10(away_id, season_id)
+            home_data = _extract_card_foul_data(home_last10)
+            away_data = _extract_card_foul_data(away_last10)
+
+            # Team aggression scores (normalized 0-1)
+            h_cards_pg = _safe_avg(home_data["all_cards"]) if home_data["all_cards"] else 0
+            h_fouls_pg = _safe_avg(home_data["all_fouls"]) if home_data["all_fouls"] else 0
+            a_cards_pg = _safe_avg(away_data["all_cards"]) if away_data["all_cards"] else 0
+            a_fouls_pg = _safe_avg(away_data["all_fouls"]) if away_data["all_fouls"] else 0
+
+            # Normalize team aggression: cards 0-5 range, fouls 0-20 range
+            home_team_aggr = (
+                0.50 * _minmax_norm(h_cards_pg, 0, 5) +
+                0.50 * _minmax_norm(h_fouls_pg, 0, 20)
+            )
+            away_team_aggr = (
+                0.50 * _minmax_norm(a_cards_pg, 0, 5) +
+                0.50 * _minmax_norm(a_fouls_pg, 0, 20)
+            )
+
+            # --- Opponent risk factors (fouls drawn / shots as dribble proxy) ---
+            home_fouls_drawn = []
+            away_fouls_drawn = []
+            home_shots_list = []
+            away_shots_list = []
+            for m in home_last10:
+                fa_val = m.get("fouls_against", -1)
+                if fa_val >= 0:
+                    home_fouls_drawn.append(fa_val)
+                sh = m.get("shots", -1)
+                if sh >= 0:
+                    home_shots_list.append(sh)
+            for m in away_last10:
+                fa_val = m.get("fouls_against", -1)
+                if fa_val >= 0:
+                    away_fouls_drawn.append(fa_val)
+                sh = m.get("shots", -1)
+                if sh >= 0:
+                    away_shots_list.append(sh)
+
+            home_fouls_drawn_avg = _safe_avg(home_fouls_drawn)
+            away_fouls_drawn_avg = _safe_avg(away_fouls_drawn)
+            home_shots_avg = _safe_avg(home_shots_list)
+            away_shots_avg = _safe_avg(away_shots_list)
+
+            # OpponentRisk for home players = how tricky the away team is
+            opp_risk_for_home = (
+                0.40 * _minmax_norm(away_shots_avg, 5, 18) +  # dribbles proxy
+                0.30 * _minmax_norm(away_fouls_drawn_avg, 5, 18) +
+                0.30 * 0.5  # position mismatch fallback
+            )
+            opp_risk_for_away = (
+                0.40 * _minmax_norm(home_shots_avg, 5, 18) +
+                0.30 * _minmax_norm(home_fouls_drawn_avg, 5, 18) +
+                0.30 * 0.5
+            )
+
+            # --- Match context ---
+            # Derby detection (word overlap)
+            home_words = set(home_name.lower().split())
+            away_words = set(away_name.lower().split())
+            common = home_words & away_words - {"fc", "sc", "cf", "ac", "afc", "united", "city", "town", "club"}
+            is_derby = len(common) >= 1 or (
+                home_name.split()[0].lower() == away_name.split()[0].lower()
+                and len(home_name.split()[0]) > 3
+            )
+            derby_flag = 1.0 if is_derby else 0.0
+
+            # H2H avg cards
+            h2h_matches = fa.get_h2h_matches(home_id, away_id, season_id)
+            h2h_card_counts = []
+            for m in h2h_matches:
+                hy = fa.safe_int(m.get("team_a_yellow_cards",
+                      m.get("home_yellow_cards", m.get("homeYellowCards", -1))))
+                ay = fa.safe_int(m.get("team_b_yellow_cards",
+                      m.get("away_yellow_cards", m.get("awayYellowCards", -1))))
+                if hy < 0 or ay < 0:
+                    continue
+                hr = fa.safe_int(m.get("team_a_red_cards",
+                      m.get("home_red_cards", m.get("homeRedCards", -1))))
+                ar = fa.safe_int(m.get("team_b_red_cards",
+                      m.get("away_red_cards", m.get("awayRedCards", -1))))
+                h2h_card_counts.append(hy + ay + max(hr, 0) + max(ar, 0))
+            h2h_avg = _safe_avg(h2h_card_counts) if h2h_card_counts else 0
+
+            # Match importance: position context
+            try:
+                pos_map = fa.build_position_map(season_id)
+                total_teams = fa.get_league_team_count(season_id)
+            except Exception:
+                pos_map = {}
+                total_teams = 0
+            home_pos = pos_map.get(home_id, 0)
+            away_pos = pos_map.get(away_id, 0)
+            importance = 0.0
+            for p in (home_pos, away_pos):
+                if p and total_teams:
+                    if p <= 3 or p >= total_teams - 2:
+                        importance = max(importance, 1.0)
+                    elif p <= 5 or p >= total_teams - 4:
+                        importance = max(importance, 0.65)
+                    else:
+                        importance = max(importance, 0.3)
+
+            match_context = (
+                0.40 * importance +
+                0.30 * derby_flag +
+                0.30 * _minmax_norm(h2h_avg, 2, 8)
+            )
+
+            # --- Referee score ---
+            ref_score = 0.5  # default when referee data unavailable
+            try:
+                ref_id = fix.get("refereeID", fix.get("referee_id", 0))
+                if ref_id:
+                    ref_data = fa.fetch_referee(int(ref_id))
+                    if ref_data:
+                        ref_yc = fa.safe_float(ref_data.get(
+                            "yellow_cards_per_game",
+                            ref_data.get("avg_yellow_cards_per_game",
+                            ref_data.get("yellowCards_per_game", 0))))
+                        ref_rc = fa.safe_float(ref_data.get(
+                            "red_cards_per_game",
+                            ref_data.get("avg_red_cards_per_game", 0)))
+                        ref_fouls = fa.safe_float(ref_data.get(
+                            "fouls_per_game",
+                            ref_data.get("avg_fouls_per_game", 0)))
+                        ref_score = (
+                            0.60 * _minmax_norm(ref_yc, 2, 7) +
+                            0.25 * _minmax_norm(ref_rc, 0, 0.5) +
+                            0.15 * _minmax_norm(ref_fouls, 18, 35)
+                        )
+                else:
+                    # Try league referees list to find match referee
+                    league_refs = fa.fetch_league_referees(season_id)
+                    for lr in league_refs:
+                        lr_id = lr.get("id", 0)
+                        if lr_id:
+                            yc_pg = fa.safe_float(lr.get(
+                                "yellow_cards_per_game",
+                                lr.get("avg_yellow_cards_per_game", 0)))
+                            if yc_pg > 0:
+                                ref_score = _minmax_norm(yc_pg, 2, 7)
+                                break
+            except Exception:
+                pass
+
+            # --- Get players for both teams ---
+            # Fetch league roster once (cached), filter per team
+            try:
+                all_league_players = fa.fetch_league_players(season_id)
+            except Exception:
+                all_league_players = []
+
+            for team_side in ("home", "away"):
+                if team_side == "home":
+                    team_id = home_id
+                    team_name = home_name
+                    opp_name = away_name
+                    team_aggr = home_team_aggr
+                    opp_risk = opp_risk_for_home
+                else:
+                    team_id = away_id
+                    team_name = away_name
+                    opp_name = home_name
+                    team_aggr = away_team_aggr
+                    opp_risk = opp_risk_for_away
+
+                # Filter roster to this team
+                roster = []
+                for rp in all_league_players:
+                    cid = rp.get("club_team_id")
+                    if cid is None:
+                        continue
+                    try:
+                        if int(cid) != team_id:
+                            continue
+                    except (ValueError, TypeError):
+                        continue
+                    apps = fa.safe_int(rp.get("appearances_overall", 0), 0)
+                    if apps < 3:
+                        continue
+                    roster.append(rp)
+
+                # Sort by appearances, take likely starters
+                roster.sort(
+                    key=lambda x: fa.safe_int(x.get("appearances_overall", 0), 0),
+                    reverse=True)
+                starters = roster[:14]
+
+                for idx, rp in enumerate(starters):
+                    pid = rp.get("id", 0)
+                    name = rp.get("known_as") or rp.get("full_name") or "Unknown"
+                    position = rp.get("position", "")
+                    appearances = fa.safe_int(rp.get("appearances_overall", 0), 0)
+
+                    # Fetch detailed stats (card-specific) for top players
+                    detail = {}
+                    if pid and idx < 15:
+                        try:
+                            detail = fa.fetch_player_detail(pid, season_id)
+                        except Exception:
+                            pass
+
+                    stats = _get_player_card_stats(detail, appearances)
+
+                    # Fallback tackles/duels by position
+                    tackles = stats["tackles_per90"]
+                    if tackles == 0:
+                        tackles = _position_tackle_estimate(position)
+                    duels = stats["duels_per90"]
+                    if duels == 0:
+                        duels = _position_duel_estimate(position)
+
+                    # --- BasePlayerRisk (0-1) ---
+                    base_risk = (
+                        0.35 * _minmax_norm(stats["yc_per90"], 0, 0.8) +
+                        0.30 * _minmax_norm(stats["fouls_per90"], 0, 3.0) +
+                        0.20 * _minmax_norm(tackles, 0, 5.0) +
+                        0.15 * _minmax_norm(duels, 0, 10.0)
+                    )
+
+                    # --- Full CRS ---
+                    crs = (
+                        0.40 * base_risk +
+                        0.20 * ref_score +
+                        0.15 * match_context +
+                        0.15 * opp_risk +
+                        0.10 * team_aggr
+                    )
+
+                    # Logistic transformation → probability %
+                    prob = 1.0 / (1.0 + math.exp(-8.0 * (crs - 0.5)))
+                    prob_pct = round(prob * 100, 1)
+
+                    if prob_pct < 35:
+                        continue
+
+                    # Risk tag
+                    if prob_pct >= 65:
+                        risk_tag = "Very High"
+                    elif prob_pct >= 50:
+                        risk_tag = "High"
+                    else:
+                        risk_tag = "Moderate"
+
+                    all_players.append({
+                        "player_name": name,
+                        "position": position,
+                        "team_name": team_name,
+                        "opponent_name": opp_name,
+                        "league": league,
+                        "kick_off": ko_str,
+                        "kick_off_unix": ko_unix,
+                        "card_prob": prob_pct,
+                        "risk_tag": risk_tag,
+                        "crs": round(crs, 3),
+                        "base_risk": round(base_risk, 3),
+                        "ref_score": round(ref_score, 3),
+                        "match_context": round(match_context, 3),
+                        "opp_risk": round(opp_risk, 3),
+                        "team_aggr": round(team_aggr, 3),
+                        "yc_per90": round(stats["yc_per90"], 2),
+                        "fouls_per90": round(stats["fouls_per90"], 2),
+                        "yc_total": int(stats["yc_total"]),
+                    })
+
+        # Sort by probability descending, take top 5
+        all_players.sort(key=lambda x: x["card_prob"], reverse=True)
+        top5 = all_players[:5]
+
+        with _lock:
+            _state["card_risk_status"] = "done"
+            _state["card_risk_results"] = top5
+            _state["card_risk_error"] = None
+
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        with _lock:
+            _state["card_risk_status"] = "done"
+            _state["card_risk_results"] = []
+            _state["card_risk_error"] = str(exc)
+
+
 def _run_shot_overs():
     """Analyse fixtures in 7 allowed competitions for Shot Over opportunities.
 
@@ -2255,6 +2709,36 @@ def corner_overs_status():
             "status": _state["corner_overs_status"],
             "results": _state["corner_overs_results"],
             "error": _state["corner_overs_error"],
+            "api_credits_used": fa.api_credits_used,
+        })
+
+
+# ---------------------------------------------------------------------------
+# Card Risk Routes
+# ---------------------------------------------------------------------------
+
+@app.route("/api/card-risk", methods=["POST"])
+def trigger_card_risk():
+    """Trigger Card Risk analysis for next 24h."""
+    with _lock:
+        if _state["card_risk_status"] == "running":
+            return jsonify({"status": "running"}), 202
+        if not _state["fixtures"]:
+            return jsonify({"error": "No fixtures loaded. Refresh first."}), 400
+
+    t = threading.Thread(target=_run_card_risk, daemon=True)
+    t.start()
+    return jsonify({"status": "running"}), 202
+
+
+@app.route("/api/card-risk-status")
+def card_risk_status():
+    """Poll Card Risk analysis status and results."""
+    with _lock:
+        return jsonify({
+            "status": _state["card_risk_status"],
+            "results": _state["card_risk_results"],
+            "error": _state["card_risk_error"],
             "api_credits_used": fa.api_credits_used,
         })
 

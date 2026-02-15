@@ -900,8 +900,23 @@
     <button class="corner-overs-btn" id="cornerOversBtn" onclick="triggerCornerOvers()">
       Corner Overs
     </button>
+    <button class="tab-btn" id="cardRiskBtn" onclick="triggerCardRisk()">
+      Carded Players
+    </button>
   </div>
   {% endif %}
+</div>
+
+<!-- Card Risk Modal -->
+<div class="modal-overlay" id="cardRiskModal">
+  <div class="modal" style="max-width:720px">
+    <div class="modal-header">
+      <h2>Top 5 Most Likely to Be Carded (24h)</h2>
+      <button class="modal-close" onclick="closeCardRiskModal()">&times;</button>
+    </div>
+    <div class="modal-body" id="cardRiskBody">
+    </div>
+  </div>
 </div>
 
 <!-- Over 2.5 Modal -->
@@ -1732,6 +1747,104 @@ function closeCornerOversModal() {
 
 document.getElementById('cornerOversModal').addEventListener('click', function(e) {
   if (e.target === this) closeCornerOversModal();
+});
+
+// Card Risk – Most Likely to Be Carded
+function triggerCardRisk() {
+  var btn = document.getElementById('cardRiskBtn');
+  btn.disabled = true;
+
+  var modal = document.getElementById('cardRiskModal');
+  var body = document.getElementById('cardRiskBody');
+  modal.classList.add('active');
+  body.innerHTML = '<div class="modal-loading"><div class="spinner"></div>' +
+    '<p>Analysing player card risk across all fixtures (next 24h)...</p>' +
+    '<p style="font-size:0.75rem;color:#475569;margin-top:8px;">Player stats, referee profile, match context &amp; team aggression</p></div>';
+
+  fetch('/api/card-risk', { method: 'POST' })
+    .then(function() { pollCardRisk(); })
+    .catch(function() {
+      body.innerHTML = '<div class="o25-empty">Request failed. Please try again.</div>';
+      btn.disabled = false;
+    });
+}
+
+function pollCardRisk() {
+  var poll = setInterval(function() {
+    fetch('/api/card-risk-status')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.status === 'done') {
+          clearInterval(poll);
+          document.getElementById('cardRiskBtn').disabled = false;
+          renderCardRisk(data.results, data.error);
+          var badge = document.querySelector('.badge-credits');
+          if (badge) badge.textContent = data.api_credits_used + ' API credits';
+        }
+      });
+  }, 2000);
+}
+
+function renderCardRisk(results, error) {
+  var body = document.getElementById('cardRiskBody');
+  if (error) {
+    body.innerHTML = '<div class="o25-empty">Error: ' + error + '</div>';
+    return;
+  }
+  if (!results || results.length === 0) {
+    body.innerHTML = '<div class="o25-empty">No players above the 35% card probability threshold in the next 24 hours.</div>';
+    return;
+  }
+
+  var html = '';
+  for (var i = 0; i < results.length; i++) {
+    var r = results[i];
+    var probColor = r.card_prob >= 65 ? '#f59e0b' : (r.card_prob >= 50 ? '#d4a054' : '#94a3b8');
+    var tagClass = r.risk_tag === 'Very High' ? 'tier-elite' : (r.risk_tag === 'High' ? 'tier-strong' : 'tier-moderate');
+
+    html += '<div class="o35c-card">' +
+      '<div style="margin-bottom:6px;">' +
+        '<span class="o35c-rank">' + (i + 1) + '</span>' +
+        '<span class="o25-teams">' + r.player_name + '</span>' +
+        '<span class="tier-badge ' + tagClass + '">' + r.risk_tag + '</span>' +
+      '</div>' +
+
+      '<div class="o25-meta">' +
+        r.team_name + ' vs ' + r.opponent_name +
+        ' &middot; ' + r.league +
+        ' &middot; ' + r.kick_off +
+      '</div>' +
+
+      '<div style="display:flex;align-items:center;gap:12px;margin:8px 0 6px;">' +
+        '<div class="o25-prob" style="color:' + probColor + ';margin-bottom:0;font-size:1.4rem;">' + r.card_prob + '% Card Probability</div>' +
+      '</div>' +
+
+      '<div class="o35c-detail-grid">' +
+        '<div>Position: <span>' + (r.position || 'Unknown') + '</span></div>' +
+        '<div>YC/90: <span>' + r.yc_per90 + '</span></div>' +
+        '<div>Fouls/90: <span>' + r.fouls_per90 + '</span></div>' +
+        '<div>YC this season: <span>' + r.yc_total + '</span></div>' +
+      '</div>' +
+
+      '<div style="font-size:0.7rem;color:#475569;margin-top:6px;">' +
+        'CRS: ' + r.crs + ' &middot; ' +
+        'Base: ' + r.base_risk + ' &middot; ' +
+        'Referee: ' + r.ref_score + ' &middot; ' +
+        'Context: ' + r.match_context + ' &middot; ' +
+        'Opponent: ' + r.opp_risk + ' &middot; ' +
+        'Team Aggr: ' + r.team_aggr +
+      '</div>' +
+    '</div>';
+  }
+  body.innerHTML = html;
+}
+
+function closeCardRiskModal() {
+  document.getElementById('cardRiskModal').classList.remove('active');
+}
+
+document.getElementById('cardRiskModal').addEventListener('click', function(e) {
+  if (e.target === this) closeCardRiskModal();
 });
 
 {% if refreshing %}

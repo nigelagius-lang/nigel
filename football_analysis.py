@@ -43,18 +43,14 @@ def api_get(endpoint: str, params: dict | None = None) -> dict | list:
     try:
         resp = requests.get(url, params=params, timeout=30)
     except requests.exceptions.ProxyError:
-        print(f"Error: Connection blocked by proxy. Run this tool from your local machine.")
-        sys.exit(1)
+        raise ConnectionError("Connection blocked by proxy. Run this tool from your local machine.")
     except requests.exceptions.ConnectionError as e:
-        print(f"Error: Could not connect to FootyStats API: {e}")
-        sys.exit(1)
+        raise ConnectionError(f"Could not connect to FootyStats API: {e}")
     api_credits_used += 1
     if resp.status_code == 403:
-        print("Error: API returned 403 Forbidden. Check your API key.")
-        sys.exit(1)
+        raise PermissionError("API returned 403 Forbidden. Check your API key.")
     if resp.status_code == 429:
-        print("Error: API rate limit exceeded. Wait and try again.")
-        sys.exit(1)
+        raise RuntimeError("API rate limit exceeded. Wait and try again.")
     resp.raise_for_status()
     data = resp.json()
     if DEBUG:

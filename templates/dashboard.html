@@ -1770,7 +1770,17 @@ function triggerCardRisk() {
 }
 
 function pollCardRisk() {
+  var attempts = 0;
+  var maxAttempts = 90;  // 90 × 2s = 3 min timeout
   var poll = setInterval(function() {
+    attempts++;
+    if (attempts > maxAttempts) {
+      clearInterval(poll);
+      document.getElementById('cardRiskBtn').disabled = false;
+      document.getElementById('cardRiskBody').innerHTML =
+        '<div class="o25-empty">Analysis timed out. Please try again.</div>';
+      return;
+    }
     fetch('/api/card-risk-status')
       .then(function(r) { return r.json(); })
       .then(function(data) {
@@ -1781,6 +1791,12 @@ function pollCardRisk() {
           var badge = document.querySelector('.badge-credits');
           if (badge) badge.textContent = data.api_credits_used + ' API credits';
         }
+      })
+      .catch(function() {
+        clearInterval(poll);
+        document.getElementById('cardRiskBtn').disabled = false;
+        document.getElementById('cardRiskBody').innerHTML =
+          '<div class="o25-empty">Connection error. Please try again.</div>';
       });
   }, 2000);
 }

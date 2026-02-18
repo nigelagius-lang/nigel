@@ -1595,6 +1595,77 @@ def _position_duel_estimate(position: str) -> float:
     return 4.5
 
 
+def _get_player_card_stats_from_roster(rp: dict, appearances: int) -> dict:
+    """Extract card-relevant per-90 stats directly from league-players roster entry.
+
+    This avoids the expensive fetch_player_detail() call per player.
+    Falls back to 0 when data is unavailable.
+    """
+    mins = fa.safe_int(rp.get("minutes_played_overall",
+                rp.get("minutes_overall",
+                rp.get("minutes_played",
+                rp.get("mins_played", 0)))), 0)
+    if mins <= 0 and appearances > 0:
+        mins = appearances * 70
+
+    nineties = mins / 90.0 if mins > 0 else max(appearances, 1)
+
+    # Yellow cards
+    yc_total = fa.safe_int(rp.get("yellow_cards_overall",
+                    rp.get("yellow_cards",
+                    rp.get("total_yellow_cards", 0))), 0)
+    yc_per90 = fa.safe_float(rp.get("yellow_cards_per_90",
+                    rp.get("yellow_cards_per_90_overall",
+                    rp.get("yellow_cards_per_game", 0))))
+    if yc_per90 == 0 and yc_total > 0:
+        yc_per90 = yc_total / nineties
+
+    # Red cards
+    rc_total = fa.safe_int(rp.get("red_cards_overall",
+                    rp.get("red_cards",
+                    rp.get("total_red_cards", 0))), 0)
+    rc_per90 = rc_total / nineties if rc_total > 0 else 0.0
+
+    # Fouls committed
+    fouls_total = fa.safe_int(rp.get("fouls_committed_overall",
+                      rp.get("fouls_committed",
+                      rp.get("total_fouls_committed", 0))), 0)
+    fouls_per90 = fa.safe_float(rp.get("fouls_committed_per_game",
+                      rp.get("fouls_committed_per_90_overall",
+                      rp.get("fouls_per_game",
+                      rp.get("avg_fouls_committed_per_game", 0)))))
+    if fouls_per90 == 0 and fouls_total > 0:
+        fouls_per90 = fouls_total / nineties
+
+    # Tackles
+    tackles_per90 = fa.safe_float(rp.get("tackles_per_game",
+                        rp.get("tackles_per_90",
+                        rp.get("avg_tackles_per_game", 0))))
+    tackles_total = fa.safe_int(rp.get("tackles_overall",
+                        rp.get("total_tackles", 0)), 0)
+    if tackles_per90 == 0 and tackles_total > 0:
+        tackles_per90 = tackles_total / nineties
+
+    # Duels
+    duels_per90 = fa.safe_float(rp.get("duels_per_game",
+                      rp.get("duels_per_90",
+                      rp.get("total_duels_per_game", 0))))
+    duels_total = fa.safe_int(rp.get("duels_overall",
+                      rp.get("total_duels", 0)), 0)
+    if duels_per90 == 0 and duels_total > 0:
+        duels_per90 = duels_total / nineties
+
+    return {
+        "yc_per90": yc_per90,
+        "rc_per90": rc_per90,
+        "fouls_per90": fouls_per90,
+        "tackles_per90": tackles_per90,
+        "duels_per90": duels_per90,
+        "minutes": mins,
+        "yc_total": yc_total,
+    }
+
+
 def _run_card_risk():
     """Analyse all fixtures (next 24h) for player card risk.
 
@@ -1621,9 +1692,26 @@ def _run_card_risk():
 
         all_players: list[dict] = []
 
+        # Caches to avoid redundant API calls across fixtures in the same league
+        league_players_cache: dict[int, list] = {}
+        league_table_cache: dict[int, tuple] = {}   # season_id → (pos_map, total_teams)
+        referee_cache: dict[int, float] = {}         # referee_id → ref_score
+
+        # Cap fixtures processed to avoid runaway API usage
+        fixtures_processed = 0
+        MAX_FIXTURES = 30
+
         for fix in fixtures:
+            if fixtures_processed >= MAX_FIXTURES:
+                break
+
             ko_unix = int(fix.get("date_unix", 0) or 0)
             if ko_unix and (ko_unix < now_ts - 3600 or ko_unix > cutoff_ts):
+                continue
+
+            # Skip postponed
+            status = (fix.get("status") or "").lower()
+            if status in ("postponed", "cancelled", "suspended"):
                 continue
 
             home_name = fix.get("home_name", "Home")
@@ -1653,9 +1741,17 @@ def _run_card_risk():
             if not season_id:
                 continue
 
+            fixtures_processed += 1
+
             # --- Team last-10 (for TeamAggression & MatchContext) ---
-            home_last10 = fa.get_team_last10(home_id, season_id)
-            away_last10 = fa.get_team_last10(away_id, season_id)
+            try:
+                home_last10 = fa.get_team_last10(home_id, season_id)
+            except Exception:
+                home_last10 = []
+            try:
+                away_last10 = fa.get_team_last10(away_id, season_id)
+            except Exception:
+                away_last10 = []
             home_data = _extract_card_foul_data(home_last10)
             away_data = _extract_card_foul_data(away_last10)
 
@@ -1723,8 +1819,11 @@ def _run_card_risk():
             )
             derby_flag = 1.0 if is_derby else 0.0
 
-            # H2H avg cards
-            h2h_matches = fa.get_h2h_matches(home_id, away_id, season_id)
+            # H2H avg cards (uses league-matches which is cached per season)
+            try:
+                h2h_matches = fa.get_h2h_matches(home_id, away_id, season_id)
+            except Exception:
+                h2h_matches = []
             h2h_card_counts = []
             for m in h2h_matches:
                 hy = fa.safe_int(m.get("team_a_yellow_cards",
@@ -1740,13 +1839,17 @@ def _run_card_risk():
                 h2h_card_counts.append(hy + ay + max(hr, 0) + max(ar, 0))
             h2h_avg = _safe_avg(h2h_card_counts) if h2h_card_counts else 0
 
-            # Match importance: position context
-            try:
-                pos_map = fa.build_position_map(season_id)
-                total_teams = fa.get_league_team_count(season_id)
-            except Exception:
-                pos_map = {}
-                total_teams = 0
+            # Match importance: position context (cached per season)
+            if season_id not in league_table_cache:
+                try:
+                    pos_map = fa.build_position_map(season_id)
+                    total_teams = fa.get_league_team_count(season_id)
+                except Exception:
+                    pos_map = {}
+                    total_teams = 0
+                league_table_cache[season_id] = (pos_map, total_teams)
+            pos_map, total_teams = league_table_cache[season_id]
+
             home_pos = pos_map.get(home_id, 0)
             away_pos = pos_map.get(away_id, 0)
             importance = 0.0
@@ -1765,12 +1868,14 @@ def _run_card_risk():
                 0.30 * _minmax_norm(h2h_avg, 2, 8)
             )
 
-            # --- Referee score ---
+            # --- Referee score (cached per referee) ---
             ref_score = 0.5  # default when referee data unavailable
-            try:
-                ref_id = fix.get("refereeID", fix.get("referee_id", 0))
-                if ref_id:
-                    ref_data = fa.fetch_referee(int(ref_id))
+            ref_id = int(fix.get("refereeID", fix.get("referee_id", 0)) or 0)
+            if ref_id and ref_id in referee_cache:
+                ref_score = referee_cache[ref_id]
+            elif ref_id:
+                try:
+                    ref_data = fa.fetch_referee(ref_id)
                     if ref_data:
                         ref_yc = fa.safe_float(ref_data.get(
                             "yellow_cards_per_game",
@@ -1787,27 +1892,18 @@ def _run_card_risk():
                             0.25 * _minmax_norm(ref_rc, 0, 0.5) +
                             0.15 * _minmax_norm(ref_fouls, 18, 35)
                         )
-                else:
-                    # Try league referees list to find match referee
-                    league_refs = fa.fetch_league_referees(season_id)
-                    for lr in league_refs:
-                        lr_id = lr.get("id", 0)
-                        if lr_id:
-                            yc_pg = fa.safe_float(lr.get(
-                                "yellow_cards_per_game",
-                                lr.get("avg_yellow_cards_per_game", 0)))
-                            if yc_pg > 0:
-                                ref_score = _minmax_norm(yc_pg, 2, 7)
-                                break
-            except Exception:
-                pass
+                except Exception:
+                    pass
+                referee_cache[ref_id] = ref_score
 
             # --- Get players for both teams ---
-            # Fetch league roster once (cached), filter per team
-            try:
-                all_league_players = fa.fetch_league_players(season_id)
-            except Exception:
-                all_league_players = []
+            # Fetch league roster once per season (cached by fa module)
+            if season_id not in league_players_cache:
+                try:
+                    league_players_cache[season_id] = fa.fetch_league_players(season_id)
+                except Exception:
+                    league_players_cache[season_id] = []
+            all_league_players = league_players_cache[season_id]
 
             for team_side in ("home", "away"):
                 if team_side == "home":
@@ -1845,21 +1941,13 @@ def _run_card_risk():
                     reverse=True)
                 starters = roster[:14]
 
-                for idx, rp in enumerate(starters):
-                    pid = rp.get("id", 0)
+                for rp in starters:
                     name = rp.get("known_as") or rp.get("full_name") or "Unknown"
                     position = rp.get("position", "")
                     appearances = fa.safe_int(rp.get("appearances_overall", 0), 0)
 
-                    # Fetch detailed stats (card-specific) for top players
-                    detail = {}
-                    if pid and idx < 15:
-                        try:
-                            detail = fa.fetch_player_detail(pid, season_id)
-                        except Exception:
-                            pass
-
-                    stats = _get_player_card_stats(detail, appearances)
+                    # Use roster data directly — no per-player API call
+                    stats = _get_player_card_stats_from_roster(rp, appearances)
 
                     # Fallback tackles/duels by position
                     tackles = stats["tackles_per90"]

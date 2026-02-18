@@ -1359,23 +1359,19 @@ def _prob_over(mean, var, line):
 # Top 5 Shot Over Opportunities
 # ---------------------------------------------------------------------------
 
-_BLOCKED_SHOT_LEAGUES = {
-    "friendly", "qualification", "u19", "u20", "u21", "u23",
-    "women", "reserve", "youth", "amateurs",
+_ALLOWED_SHOT_LEAGUES = {
+    "premier league", "ligue 1", "la liga", "serie a", "bundesliga",
+    "champions league", "europa league",
 }
 
 
 def _is_allowed_shot_league(league_name: str) -> bool:
-    """Check if fixture is in a valid competition for shot analysis.
-
-    All professional leagues are allowed; only friendlies, youth, and
-    qualification rounds are excluded.
-    """
+    """Check if fixture belongs to one of the 7 allowed shot competitions."""
     name_lower = league_name.lower()
-    for blocked in _BLOCKED_SHOT_LEAGUES:
-        if blocked in name_lower:
-            return False
-    return True
+    for allowed in _ALLOWED_SHOT_LEAGUES:
+        if allowed in name_lower:
+            return True
+    return False
 
 
 def _compute_league_shot_stats(season_id):
@@ -1945,7 +1941,7 @@ def _run_card_risk():
 
 
 def _run_shot_overs():
-    """Analyse fixtures across all professional leagues for Shot Over opportunities.
+    """Analyse fixtures in 7 allowed competitions for Shot Over opportunities.
 
     Model:
       1. Compute expected shots per team (home/away split + opponent conceding).

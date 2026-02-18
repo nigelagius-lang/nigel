@@ -1674,7 +1674,11 @@ def _run_card_risk():
         now_ts = int(datetime.now(timezone.utc).timestamp())
         cutoff_ts = now_ts + 24 * 3600  # next 24 hours only
 
-        all_players: list[dict] = []
+        # ---------------------------------------------------------------
+        # PASS 1 — Cheap pre-ranking using roster data + heuristics
+        # Collects all candidates across every fixture, no per-player API calls
+        # ---------------------------------------------------------------
+        all_candidates: list[dict] = []
 
         # Caches to avoid redundant API calls across fixtures in the same league
         league_players_cache: dict[int, list] = {}
@@ -1889,13 +1893,7 @@ def _run_card_risk():
                     league_players_cache[season_id] = []
             all_league_players = league_players_cache[season_id]
 
-            # --- Two-pass player scoring ---
-            # Pass 1: Quick-score all starters using roster data only
-            #         (YC/RC from roster + position heuristics for fouls/tackles/duels)
-            # Pass 2: Fetch player_detail for top 5 candidates to get real fouls/tackles
-
-            fixture_candidates: list[dict] = []
-
+            # Pre-score every starter using roster YC + position heuristics
             for team_side in ("home", "away"):
                 if team_side == "home":
                     team_id = home_id
@@ -1938,20 +1936,20 @@ def _run_card_risk():
                     appearances = fa.safe_int(rp.get("appearances_overall", 0), 0)
                     pid = rp.get("id", 0)
 
-                    # Pass 1: roster stats + position heuristics
-                    stats = _get_player_card_stats_from_roster(rp, appearances)
-                    fouls = _position_fouls_estimate(position)
-                    tackles = _position_tackle_estimate(position)
-                    duels = _position_duel_estimate(position)
+                    # Roster stats (YC available) + position heuristics
+                    roster_stats = _get_player_card_stats_from_roster(rp, appearances)
+                    fouls_est = _position_fouls_estimate(position)
+                    tackles_est = _position_tackle_estimate(position)
+                    duels_est = _position_duel_estimate(position)
 
                     base_risk = (
-                        0.35 * _minmax_norm(stats["yc_per90"], 0, 0.8) +
-                        0.30 * _minmax_norm(fouls, 0, 3.0) +
-                        0.20 * _minmax_norm(tackles, 0, 5.0) +
-                        0.15 * _minmax_norm(duels, 0, 10.0)
+                        0.35 * _minmax_norm(roster_stats["yc_per90"], 0, 0.8) +
+                        0.30 * _minmax_norm(fouls_est, 0, 3.0) +
+                        0.20 * _minmax_norm(tackles_est, 0, 5.0) +
+                        0.15 * _minmax_norm(duels_est, 0, 10.0)
                     )
 
-                    crs = (
+                    preliminary_crs = (
                         0.40 * base_risk +
                         0.20 * ref_score +
                         0.15 * match_context +
@@ -1959,99 +1957,106 @@ def _run_card_risk():
                         0.10 * team_aggr
                     )
 
-                    fixture_candidates.append({
+                    all_candidates.append({
                         "pid": pid,
-                        "rp": rp,
+                        "season_id": season_id,
                         "name": name,
                         "position": position,
                         "appearances": appearances,
                         "team_name": team_name,
                         "opp_name": opp_name,
+                        "league": league,
+                        "ko_str": ko_str,
+                        "ko_unix": ko_unix,
                         "team_aggr": team_aggr,
                         "opp_risk": opp_risk,
-                        "preliminary_crs": crs,
-                        "stats_roster": stats,
+                        "ref_score": ref_score,
+                        "match_context": match_context,
+                        "preliminary_crs": preliminary_crs,
+                        "roster_stats": roster_stats,
                     })
 
-            # Sort candidates by preliminary CRS, take top 5 for detailed lookup
-            fixture_candidates.sort(key=lambda c: c["preliminary_crs"], reverse=True)
-            top_candidates = fixture_candidates[:5]
+        # ---------------------------------------------------------------
+        # PASS 2 — Fetch real player detail for global top 25 candidates
+        # Then re-score with actual fouls/tackles/duels data
+        # ---------------------------------------------------------------
+        all_candidates.sort(key=lambda c: c["preliminary_crs"], reverse=True)
+        shortlist = all_candidates[:25]
 
-            # Pass 2: fetch player_detail for top candidates to get real fouls/tackles/duels
-            detail_cache: dict[int, dict] = {}
-            for cand in top_candidates:
-                pid = cand["pid"]
-                if pid and pid not in detail_cache:
-                    try:
-                        detail_cache[pid] = fa.fetch_player_detail(pid, season_id)
-                    except Exception:
-                        detail_cache[pid] = {}
+        detail_cache: dict[int, dict] = {}
+        for cand in shortlist:
+            pid = cand["pid"]
+            if pid and pid not in detail_cache:
+                try:
+                    detail_cache[pid] = fa.fetch_player_detail(pid, cand["season_id"])
+                except Exception:
+                    detail_cache[pid] = {}
 
-            # Re-score top candidates with detailed stats
-            for cand in top_candidates:
-                pid = cand["pid"]
-                detail = detail_cache.get(pid, {})
-                position = cand["position"]
-                appearances = cand["appearances"]
+        all_players: list[dict] = []
+        for cand in shortlist:
+            pid = cand["pid"]
+            detail = detail_cache.get(pid, {})
+            position = cand["position"]
+            appearances = cand["appearances"]
 
-                if detail:
-                    stats = _get_player_card_stats(detail, appearances)
-                else:
-                    stats = cand["stats_roster"]
+            # Use detailed stats when available, fall back to roster
+            if detail:
+                stats = _get_player_card_stats(detail, appearances)
+            else:
+                stats = cand["roster_stats"]
 
-                # Use real data if available, else position heuristics
-                fouls = stats["fouls_per90"] if stats["fouls_per90"] > 0 else _position_fouls_estimate(position)
-                tackles = stats["tackles_per90"] if stats["tackles_per90"] > 0 else _position_tackle_estimate(position)
-                duels = stats["duels_per90"] if stats["duels_per90"] > 0 else _position_duel_estimate(position)
+            fouls = stats["fouls_per90"] if stats["fouls_per90"] > 0 else _position_fouls_estimate(position)
+            tackles = stats["tackles_per90"] if stats["tackles_per90"] > 0 else _position_tackle_estimate(position)
+            duels = stats["duels_per90"] if stats["duels_per90"] > 0 else _position_duel_estimate(position)
 
-                base_risk = (
-                    0.35 * _minmax_norm(stats["yc_per90"], 0, 0.8) +
-                    0.30 * _minmax_norm(fouls, 0, 3.0) +
-                    0.20 * _minmax_norm(tackles, 0, 5.0) +
-                    0.15 * _minmax_norm(duels, 0, 10.0)
-                )
+            base_risk = (
+                0.35 * _minmax_norm(stats["yc_per90"], 0, 0.8) +
+                0.30 * _minmax_norm(fouls, 0, 3.0) +
+                0.20 * _minmax_norm(tackles, 0, 5.0) +
+                0.15 * _minmax_norm(duels, 0, 10.0)
+            )
 
-                crs = (
-                    0.40 * base_risk +
-                    0.20 * ref_score +
-                    0.15 * match_context +
-                    0.15 * cand["opp_risk"] +
-                    0.10 * cand["team_aggr"]
-                )
+            crs = (
+                0.40 * base_risk +
+                0.20 * cand["ref_score"] +
+                0.15 * cand["match_context"] +
+                0.15 * cand["opp_risk"] +
+                0.10 * cand["team_aggr"]
+            )
 
-                prob = 1.0 / (1.0 + math.exp(-8.0 * (crs - 0.5)))
-                prob_pct = round(prob * 100, 1)
+            prob = 1.0 / (1.0 + math.exp(-8.0 * (crs - 0.5)))
+            prob_pct = round(prob * 100, 1)
 
-                if prob_pct < 35:
-                    continue
+            if prob_pct < 35:
+                continue
 
-                if prob_pct >= 65:
-                    risk_tag = "Very High"
-                elif prob_pct >= 50:
-                    risk_tag = "High"
-                else:
-                    risk_tag = "Moderate"
+            if prob_pct >= 65:
+                risk_tag = "Very High"
+            elif prob_pct >= 50:
+                risk_tag = "High"
+            else:
+                risk_tag = "Moderate"
 
-                all_players.append({
-                    "player_name": cand["name"],
-                    "position": position,
-                    "team_name": cand["team_name"],
-                    "opponent_name": cand["opp_name"],
-                    "league": league,
-                    "kick_off": ko_str,
-                    "kick_off_unix": ko_unix,
-                    "card_prob": prob_pct,
-                    "risk_tag": risk_tag,
-                    "crs": round(crs, 3),
-                    "base_risk": round(base_risk, 3),
-                    "ref_score": round(ref_score, 3),
-                    "match_context": round(match_context, 3),
-                    "opp_risk": round(cand["opp_risk"], 3),
-                    "team_aggr": round(cand["team_aggr"], 3),
-                    "yc_per90": round(stats["yc_per90"], 2),
-                    "fouls_per90": round(fouls, 2),
-                    "yc_total": int(stats["yc_total"]),
-                })
+            all_players.append({
+                "player_name": cand["name"],
+                "position": position,
+                "team_name": cand["team_name"],
+                "opponent_name": cand["opp_name"],
+                "league": cand["league"],
+                "kick_off": cand["ko_str"],
+                "kick_off_unix": cand["ko_unix"],
+                "card_prob": prob_pct,
+                "risk_tag": risk_tag,
+                "crs": round(crs, 3),
+                "base_risk": round(base_risk, 3),
+                "ref_score": round(cand["ref_score"], 3),
+                "match_context": round(cand["match_context"], 3),
+                "opp_risk": round(cand["opp_risk"], 3),
+                "team_aggr": round(cand["team_aggr"], 3),
+                "yc_per90": round(stats["yc_per90"], 2),
+                "fouls_per90": round(fouls, 2),
+                "yc_total": int(stats["yc_total"]),
+            })
 
         # Sort by probability descending, take top 5
         all_players.sort(key=lambda x: x["card_prob"], reverse=True)

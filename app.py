@@ -1750,14 +1750,17 @@ def _run_card_risk():
             a_fouls_pg = _safe_avg(away_data["all_fouls"]) if away_data["all_fouls"] else 0
 
             # Normalize team aggression: cards 0-5 range, fouls 0-20 range
+            # Fall back to league-average 0.35 when no data is available
+            _has_home_data = bool(home_data["all_cards"] or home_data["all_fouls"])
+            _has_away_data = bool(away_data["all_cards"] or away_data["all_fouls"])
             home_team_aggr = (
                 0.50 * _minmax_norm(h_cards_pg, 0, 5) +
                 0.50 * _minmax_norm(h_fouls_pg, 0, 20)
-            )
+            ) if _has_home_data else 0.35
             away_team_aggr = (
                 0.50 * _minmax_norm(a_cards_pg, 0, 5) +
                 0.50 * _minmax_norm(a_fouls_pg, 0, 20)
-            )
+            ) if _has_away_data else 0.35
 
             # --- Opponent risk factors (fouls drawn / shots as dribble proxy) ---
             home_fouls_drawn = []
@@ -1785,16 +1788,19 @@ def _run_card_risk():
             away_shots_avg = _safe_avg(away_shots_list)
 
             # OpponentRisk for home players = how tricky the away team is
+            # Fall back to moderate 0.40 when no shots/fouls data available
+            _has_away_shots = bool(away_shots_list or away_fouls_drawn)
+            _has_home_shots = bool(home_shots_list or home_fouls_drawn)
             opp_risk_for_home = (
                 0.40 * _minmax_norm(away_shots_avg, 5, 18) +  # dribbles proxy
                 0.30 * _minmax_norm(away_fouls_drawn_avg, 5, 18) +
                 0.30 * 0.5  # position mismatch fallback
-            )
+            ) if _has_away_shots else 0.40
             opp_risk_for_away = (
                 0.40 * _minmax_norm(home_shots_avg, 5, 18) +
                 0.30 * _minmax_norm(home_fouls_drawn_avg, 5, 18) +
                 0.30 * 0.5
-            )
+            ) if _has_home_shots else 0.40
 
             # --- Match context ---
             # Derby detection (word overlap)
@@ -1850,11 +1856,11 @@ def _run_card_risk():
                     else:
                         importance = max(importance, 0.3)
 
-            match_context = (
+            match_context = max(0.25, (
                 0.40 * importance +
                 0.30 * derby_flag +
                 0.30 * _minmax_norm(h2h_avg, 2, 8)
-            )
+            ))
 
             # --- Referee score (cached per referee) ---
             ref_score = 0.5  # default when referee data unavailable
@@ -2151,7 +2157,7 @@ def _run_shot_overs():
             lg = league_shot_cache[season_id]
 
             # Skip leagues with insufficient data
-            if lg["match_count"] < 15:
+            if lg["match_count"] < 8:
                 continue
 
             # Team data
@@ -2164,7 +2170,7 @@ def _run_shot_overs():
             # Skip if insufficient data
             if not home_prof or not away_prof:
                 continue
-            if home_prof["match_count"] < 3 or away_prof["match_count"] < 3:
+            if home_prof["match_count"] < 2 or away_prof["match_count"] < 2:
                 continue
 
             # --- Step 1: Baseline expected shots ---
